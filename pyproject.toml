@@ -1,0 +1,10 @@
+[project]
+name = "noessi-crawl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "crawl4ai>=0.7.7",
+    "playwright>=1.56.0",
+]
