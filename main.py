@@ -13,11 +13,57 @@ async def load_config():
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
 
+    # Validate required fields
+    if "portal" not in config:
+        raise ValueError("Missing required field 'portal' in config.json")
+
+    if config["portal"] == "willhaben":
+        if "area_ids" not in config:
+            raise ValueError("Missing required field 'area_ids' for willhaben portal")
+        if "price_max" not in config:
+            raise ValueError("Missing required field 'price_max' for willhaben portal")
+        if not isinstance(config["area_ids"], list):
+            raise ValueError("Field 'area_ids' must be a list of integers")
+        if not isinstance(config["price_max"], (int, float)):
+            raise ValueError("Field 'price_max' must be a number")
+
     # Ensure output folder exists
     output_folder = Path(__file__).parent / config.get("output_folder", "output")
     output_folder.mkdir(exist_ok=True)
 
     return config
+
+
+def build_willhaben_url(area_ids: list, price_max: int) -> str:
+    """
+    Build willhaben.at search URL from configuration parameters
+
+    Args:
+        area_ids: List of postal code area IDs (e.g., [201, 202, 203])
+        price_max: Maximum price threshold
+
+    Returns:
+        Complete willhaben.at search URL with query parameters
+    """
+    base_url = "https://www.willhaben.at/iad/immobilien/eigentumswohnung/eigentumswohnung-angebote"
+
+    # Build query parameters
+    params = []
+
+    # Add area IDs
+    for area_id in area_ids:
+        params.append(f"areaId={area_id}")
+
+    # Add price threshold
+    params.append(f"PRICE_TO={int(price_max)}")
+
+    # Add navigation flag (based on existing URL pattern)
+    params.append("isNavigation=true")
+
+    # Combine into final URL
+    url = f"{base_url}?{'&'.join(params)}"
+
+    return url
 
 
 async def scrape_apartments(url: str) -> list:
@@ -198,24 +244,36 @@ async def fetch_apartment_details(crawler, url: str) -> dict:
         return None
 
 
-def generate_markdown(apartments: list, url: str) -> str:
+def generate_markdown(apartments: list, config: dict, url: str) -> str:
     """
     Generate markdown formatted output for apartment listings
 
     Args:
         apartments: List of apartment dictionaries
-        url: Original search URL
+        config: Configuration dictionary with portal settings
+        url: Generated search URL
 
     Returns:
         Markdown formatted string
     """
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Format area IDs for display
+    area_ids_str = ", ".join(str(aid) for aid in config.get("area_ids", []))
+
     md_content = f"""# Willhaben.at Apartment Investment Opportunities
 
 **Generated:** {timestamp}
-**Search URL:** {url}
+**Portal:** {config.get("portal", "N/A")}
+**Area IDs (PLZ):** {area_ids_str}
+**Max Price:** € {config.get("price_max", "N/A"):,}
 **Total Listings Found:** {len(apartments)}
+
+<details>
+<summary>Search URL</summary>
+
+{url}
+</details>
 
 ---
 
@@ -253,18 +311,22 @@ async def main():
     try:
         # Load configuration
         config = await load_config()
-        url = config.get("url")
         output_folder = config.get("output_folder", "output")
 
-        if not url:
-            print("❌ Error: No URL found in config.json")
+        # Build URL based on portal configuration
+        if config["portal"] == "willhaben":
+            url = build_willhaben_url(
+                area_ids=config["area_ids"], price_max=config["price_max"]
+            )
+        else:
+            print(f"❌ Error: Unsupported portal '{config['portal']}'")
             return
 
         # Scrape apartments
         apartments = await scrape_apartments(url)
 
         # Generate markdown output
-        markdown_content = generate_markdown(apartments, url)
+        markdown_content = generate_markdown(apartments, config, url)
 
         # Write to file in output folder
         output_file = Path(__file__).parent / output_folder / "apartments.md"

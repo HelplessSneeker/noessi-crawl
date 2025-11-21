@@ -1,4 +1,6 @@
 {
-  "url": "https://www.willhaben.at/iad/immobilien/eigentumswohnung/eigentumswohnung-angebote?sfId=7c32d4ca-afec-40ce-a5a9-bad4d071f3f8&isNavigation=true&areaId=201&areaId=202&areaId=117223&areaId=117224&areaId=117225&areaId=117226&areaId=117227&areaId=117228&PRICE_TO=200000",
+  "portal": "willhaben",
+  "area_ids": [201, 202, 117223, 117224, 117225, 117226, 117227, 117228],
+  "price_max": 200000,
   "output_folder": "output"
 }
