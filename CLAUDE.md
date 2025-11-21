@@ -31,19 +31,23 @@ playwright install
 uv run python main.py
 ```
 
-The scraper reads the search URL from `config.json` and:
-1. Fetches the listing page from willhaben.at
-2. Extracts apartment URLs from JSON-LD structured data
-3. Crawls individual apartment pages (first 30 by default)
-4. Filters out ads (checks for star icon SVG path)
-5. Extracts: title, price, square meters, price/m², energy class, location
-6. Generates a markdown table in `output/apartments.md`
+The scraper reads configuration from `config.json` and:
+1. Builds willhaben.at search URL from config parameters (area_ids, price_max)
+2. Crawls paginated listing pages until no more results found
+3. Extracts apartment URLs from JSON-LD structured data
+4. Fetches individual apartment pages for detailed information
+5. Filters out ads (checks for star icon SVG path)
+6. Extracts: title, price, square meters, price/m², energy class, location
+7. Generates a markdown table in `output/apartments.md`
 
 ## Configuration
 
 Edit `config.json` to customize:
-- `url`: willhaben.at search URL with desired filters (location, price range, etc.)
-- `output_folder`: folder where apartments.md will be saved (default: "output")
+- `portal`: Portal name (currently only "willhaben" supported)
+- `area_ids`: List of postal code area IDs (e.g., [201, 202, 203] for specific regions)
+- `price_max`: Maximum price threshold in euros
+- `output_folder`: Folder where apartments.md will be saved (default: "output")
+- `max_pages`: Maximum pages to scrape (null = unlimited, stops after 2 consecutive empty pages)
 
 ## Project Structure
 
@@ -57,16 +61,21 @@ Edit `config.json` to customize:
 
 ### Data Extraction Approach
 
-The scraper uses a two-phase approach:
-1. **List page**: Extracts apartment URLs from JSON-LD structured data in the search results
-2. **Detail pages**: Fetches each apartment page and extracts details using regex patterns
+The scraper uses a multi-phase approach:
+1. **URL building**: Constructs willhaben.at search URLs from config parameters (area_ids, price_max)
+2. **Pagination**: Automatically crawls multiple pages until 2 consecutive empty pages found
+3. **List pages**: Extracts apartment URLs from JSON-LD structured data in search results
+4. **Detail pages**: Fetches each apartment page and extracts details using regex patterns
 
 ### Key Implementation Details
 
+- **URL construction**: Builds search URLs from `area_ids` (postal codes) and `price_max` parameters
+- **Automatic pagination**: Continues scraping pages until no more results (2 consecutive empty pages)
 - **Vienna district codes**: Postal codes like 1030 encode district as `(code % 100) / 10` (1030 → 3rd district)
 - **Price extraction**: Uses JSON-LD `"price"` field from structured data (more reliable than HTML scraping)
-- **Rate limiting**: 0.5 second delay between requests to be polite to the server
+- **Rate limiting**: 0.5 second delay between apartment requests, 1.0 second between pages
 - **Async operations**: Built on asyncio with crawl4ai's AsyncWebCrawler
+- **Ad filtering**: Excludes promoted listings by checking for star icon SVG in HTML
 
 ### LLM Note
 

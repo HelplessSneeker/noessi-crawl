@@ -34,13 +34,14 @@ async def load_config():
     return config
 
 
-def build_willhaben_url(area_ids: list, price_max: int) -> str:
+def build_willhaben_url(area_ids: list, price_max: int, page: int = 1) -> str:
     """
     Build willhaben.at search URL from configuration parameters
 
     Args:
         area_ids: List of postal code area IDs (e.g., [201, 202, 203])
         price_max: Maximum price threshold
+        page: Page number for pagination (default: 1)
 
     Returns:
         Complete willhaben.at search URL with query parameters
@@ -57,6 +58,9 @@ def build_willhaben_url(area_ids: list, price_max: int) -> str:
     # Add price threshold
     params.append(f"PRICE_TO={int(price_max)}")
 
+    # Add pagination parameter
+    params.append(f"page={page}")
+
     # Add navigation flag (based on existing URL pattern)
     params.append("isNavigation=true")
 
@@ -66,17 +70,18 @@ def build_willhaben_url(area_ids: list, price_max: int) -> str:
     return url
 
 
-async def scrape_apartments(url: str) -> list:
+async def scrape_apartments(url: str, page: int = 1) -> list:
     """
     Scrape apartment listings from willhaben.at
 
     Args:
         url: The filtered willhaben.at URL with search parameters
+        page: Current page number being scraped
 
     Returns:
         List of apartment dictionaries with extracted data
     """
-    print("🏠 Starting apartment scraper...")
+    print(f"🏠 Scraping apartments from page {page}...")
     print(f"📍 Target URL: {url}")
 
     # Crawl the webpage
@@ -102,18 +107,16 @@ async def scrape_apartments(url: str) -> list:
         apartments = extract_apartments_from_html(result.html)
 
         if apartments:
-            print(f"📊 Found {len(apartments)} apartments from JSON-LD")
+            print(f"📊 Found {len(apartments)} apartments from JSON-LD on page {page}")
 
             # Now fetch details for each apartment
             print("📝 Fetching detailed information for each apartment...")
             detailed_apartments = []
 
-            for i, apt in enumerate(
-                apartments[:30], 1
-            ):  # Limit to first 30 to avoid rate limiting
+            for i, apt in enumerate(apartments, 1):
                 url = apt.get("url", "")
                 if url:
-                    print(f"  [{i}/{min(len(apartments), 30)}] Fetching: {url}")
+                    print(f"  [{i}/{len(apartments)}] Fetching: {url}")
                     details = await fetch_apartment_details(crawler, url)
                     if details:
                         detailed_apartments.append(details)
@@ -122,7 +125,7 @@ async def scrape_apartments(url: str) -> list:
 
             return detailed_apartments
         else:
-            print("⚠️ No apartments found in JSON-LD data")
+            print(f"⚠️ No apartments found on page {page}")
             return []
 
 
@@ -312,29 +315,78 @@ async def main():
         # Load configuration
         config = await load_config()
         output_folder = config.get("output_folder", "output")
+        max_pages = config.get("max_pages", None)  # None means unlimited
 
         # Build URL based on portal configuration
-        if config["portal"] == "willhaben":
-            url = build_willhaben_url(
-                area_ids=config["area_ids"], price_max=config["price_max"]
-            )
-        else:
+        if config["portal"] != "willhaben":
             print(f"❌ Error: Unsupported portal '{config['portal']}'")
             return
 
-        # Scrape apartments
-        apartments = await scrape_apartments(url)
+        # Scrape apartments from all pages
+        all_apartments = []
+        page = 1
+        consecutive_empty_pages = 0
+        max_consecutive_empty = 2  # Stop if we get 2 empty pages in a row
 
-        # Generate markdown output
-        markdown_content = generate_markdown(apartments, config, url)
+        print(
+            f"🔄 Starting pagination (max_pages: {max_pages if max_pages else 'unlimited'})"
+        )
+
+        while True:
+            # Check if we've reached the max page limit
+            if max_pages and page > max_pages:
+                print(f"🛑 Reached maximum page limit ({max_pages})")
+                break
+
+            # Build URL for current page
+            url = build_willhaben_url(
+                area_ids=config["area_ids"], price_max=config["price_max"], page=page
+            )
+
+            # Scrape apartments from current page
+            page_apartments = await scrape_apartments(url, page)
+
+            # If we found apartments, add them and reset empty counter
+            if page_apartments:
+                all_apartments.extend(page_apartments)
+                consecutive_empty_pages = 0
+                print(
+                    f"✅ Page {page}: Found {len(page_apartments)} apartments (Total: {len(all_apartments)})"
+                )
+            else:
+                consecutive_empty_pages += 1
+                print(
+                    f"⚠️ Page {page}: No apartments found ({consecutive_empty_pages}/{max_consecutive_empty} empty pages)"
+                )
+
+                # Stop if we hit too many consecutive empty pages
+                if consecutive_empty_pages >= max_consecutive_empty:
+                    print(
+                        f"🛑 Stopping: {max_consecutive_empty} consecutive empty pages detected"
+                    )
+                    break
+
+            # Add a small delay between pages to be polite
+            if page_apartments or consecutive_empty_pages < max_consecutive_empty:
+                await asyncio.sleep(1.0)
+
+            page += 1
+
+        print(f"\n📊 Pagination complete! Processed {page - 1} pages")
+        print(f"📝 Total apartments collected: {len(all_apartments)}")
+
+        # Generate markdown output with base URL (without page parameter for display)
+        base_url = build_willhaben_url(
+            area_ids=config["area_ids"], price_max=config["price_max"], page=1
+        )
+        markdown_content = generate_markdown(all_apartments, config, base_url)
 
         # Write to file in output folder
         output_file = Path(__file__).parent / output_folder / "apartments.md"
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(markdown_content)
 
-        print(f"\n✅ Success! Apartment listings saved to: {output_file}")
-        print(f"📝 Total apartments extracted: {len(apartments)}")
+        print(f"✅ Success! Apartment listings saved to: {output_file}")
 
     except FileNotFoundError:
         print("❌ Error: config.json not found")

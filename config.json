@@ -2,5 +2,6 @@
   "portal": "willhaben",
   "area_ids": [201, 202, 117223, 117224, 117225, 117226, 117227, 117228],
   "price_max": 200000,
-  "output_folder": "output"
+  "output_folder": "output",
+  "max_pages": null
 }
