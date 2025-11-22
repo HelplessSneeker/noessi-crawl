@@ -1,13 +1,689 @@
+"""Enhanced apartment scraper with investment analysis."""
+
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
 
-from crawl4ai import *
+from crawl4ai import AsyncWebCrawler
+
+from llm.analyzer import InvestmentAnalyzer
+from llm.extractor import OllamaExtractor
+from models.apartment import ApartmentListing
+from utils.address_parser import AustrianAddressParser
+from utils.extractors import AustrianRealEstateExtractor
+from utils.markdown_generator import MarkdownGenerator
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
-async def load_config():
+class EnhancedApartmentScraper:
+    """Enhanced apartment scraper with investment analysis capabilities."""
+
+    def __init__(self, config: Dict[str, Any]):
+        """
+        Initialize the scraper with configuration.
+
+        Args:
+            config: Configuration dictionary from config.json
+        """
+        self.config = config
+        self.portal = config.get("portal", "willhaben")
+
+        # Generate timestamped run folder
+        self.run_timestamp = datetime.now()
+        self.run_id = self.run_timestamp.strftime("%Y-%m-%d-%H%M%S")
+
+        # Initialize components
+        self.extractor = AustrianRealEstateExtractor()
+        self.address_parser = AustrianAddressParser()
+
+        # LLM extractor (optional)
+        extraction_config = config.get("extraction", {})
+        self.use_llm = extraction_config.get("use_llm", False)
+        self.fallback_to_regex = extraction_config.get("fallback_to_regex", True)
+
+        if self.use_llm:
+            llm_model = extraction_config.get("llm_model", "qwen3:8b")
+            self.llm_extractor = OllamaExtractor(model=llm_model)
+        else:
+            self.llm_extractor = None
+
+        # Investment analyzer
+        analysis_config = config.get("analysis", {})
+        self.analyzer = InvestmentAnalyzer(analysis_config)
+
+        # Markdown generator with timestamped folder
+        output_folder = config.get("output_folder", "output")
+        self.run_folder = Path(output_folder) / f"apartments_{self.run_id}"
+        self.md_generator = MarkdownGenerator(output_dir=str(self.run_folder))
+
+        # Filters
+        self.filters = config.get("filters", {})
+
+        # Output settings
+        output_config = config.get("output", {})
+        self.include_rejected = output_config.get("include_rejected", False)
+        self.generate_summary = output_config.get("generate_summary", True)
+        self.summary_top_n = output_config.get("summary_top_n", 20)
+
+        # Rate limiting
+        rate_config = config.get("rate_limiting", {})
+        self.delay_apartment = rate_config.get("delay_apartment", 0.5)
+        self.delay_page = rate_config.get("delay_page", 1.0)
+
+        # Tracking
+        self.seen_listings: Set[str] = set()
+        self.processed_apartments: List[ApartmentListing] = []
+        self.apartment_files: Dict[str, str] = {}  # listing_id -> filepath
+
+    def build_willhaben_url(self, page: int = 1) -> str:
+        """Build willhaben.at search URL from configuration parameters."""
+        base_url = "https://www.willhaben.at/iad/immobilien/eigentumswohnung/eigentumswohnung-angebote"
+
+        params = []
+
+        # Add area IDs
+        for area_id in self.config.get("area_ids", []):
+            params.append(f"areaId={area_id}")
+
+        # Add price threshold
+        price_max = self.config.get("price_max")
+        if price_max:
+            params.append(f"PRICE_TO={int(price_max)}")
+
+        # Add pagination
+        params.append(f"page={page}")
+        params.append("isNavigation=true")
+
+        return f"{base_url}?{'&'.join(params)}"
+
+    def extract_listing_urls(self, html: str) -> List[Dict[str, str]]:
+        """Extract apartment URLs from JSON-LD structured data."""
+        try:
+            match = re.search(
+                r'<script type="application/ld\+json">({.*?"@type":"ItemList".*?})</script>',
+                html,
+                re.DOTALL,
+            )
+            if match:
+                json_data = json.loads(match.group(1))
+                items = json_data.get("itemListElement", [])
+                return [
+                    {"url": f"https://www.willhaben.at{item.get('url', '')}"}
+                    for item in items
+                    if item.get("url")
+                ]
+        except Exception as e:
+            logger.warning(f"Error extracting JSON-LD: {e}")
+        return []
+
+    def extract_listing_id(self, url: str) -> str:
+        """Extract listing ID from URL."""
+        # willhaben URLs typically end with the listing ID
+        match = re.search(r"/(\d+)/?$", url)
+        if match:
+            return match.group(1)
+        # Fallback to hash of URL
+        return str(hash(url))
+
+    async def extract_apartment_data(
+        self, html: str, url: str
+    ) -> Optional[ApartmentListing]:
+        """
+        Extract apartment data using multi-strategy approach.
+
+        1. JSON-LD structured data (primary)
+        2. Regex patterns (fallback)
+        3. LLM extraction (if enabled, for missing fields)
+        """
+        listing_id = self.extract_listing_id(url)
+
+        # Check for ad filtering - star icon indicates real listing
+        star_icon_path = "m12 4 2.09 4.25a1.52 1.52 0 0 0 1.14.82l4.64.64-3.42 3.32"
+        if star_icon_path not in html:
+            logger.debug(f"Skipping ad/promoted listing: {url}")
+            return None
+
+        # Initialize apartment with basic data
+        apartment = ApartmentListing(
+            listing_id=listing_id,
+            source_url=url,
+            source_portal=self.portal,
+        )
+
+        # Strategy 1: Extract from JSON-LD
+        json_ld_data = self._extract_json_ld(html)
+        if json_ld_data:
+            apartment.raw_json_ld = json_ld_data
+            self._apply_json_ld_data(apartment, json_ld_data)
+
+        # Strategy 2: Extract using regex patterns
+        regex_data = self.extractor.extract_from_html(html)
+        self._apply_regex_data(apartment, regex_data)
+
+        # Extract address
+        address_text = self._extract_address_from_html(html, url)
+        if address_text:
+            parsed_address = self.address_parser.parse_address(address_text)
+            self._apply_address_data(apartment, parsed_address)
+
+        # Strategy 3: LLM extraction (if enabled and missing critical fields)
+        if self.use_llm and self.llm_extractor:
+            missing_critical = not apartment.price or not apartment.size_sqm
+            if missing_critical or self._has_missing_fields(apartment):
+                existing_data = apartment.to_dict()
+                llm_data = await self.llm_extractor.extract_structured_data(
+                    html, existing_data
+                )
+                self._apply_llm_data(apartment, llm_data)
+
+        # Extract title from markdown/HTML if not set
+        if not apartment.title:
+            apartment.title = self._extract_title(html)
+
+        return apartment
+
+    def _extract_json_ld(self, html: str) -> Optional[Dict[str, Any]]:
+        """Extract JSON-LD product data from HTML."""
+        try:
+            # Look for product JSON-LD
+            match = re.search(
+                r'<script type="application/ld\+json">({.*?"@type":\s*"Product".*?})</script>',
+                html,
+                re.DOTALL,
+            )
+            if match:
+                return json.loads(match.group(1))
+        except Exception as e:
+            logger.debug(f"Error parsing JSON-LD: {e}")
+        return None
+
+    def _apply_json_ld_data(
+        self, apartment: ApartmentListing, data: Dict[str, Any]
+    ) -> None:
+        """Apply JSON-LD data to apartment."""
+        if "name" in data:
+            apartment.title = data["name"]
+
+        # Price from offers
+        offers = data.get("offers", {})
+        if isinstance(offers, dict):
+            price = offers.get("price")
+            if price:
+                try:
+                    apartment.price = float(price)
+                except (ValueError, TypeError):
+                    pass
+
+    def _apply_regex_data(
+        self, apartment: ApartmentListing, data: Dict[str, Any]
+    ) -> None:
+        """Apply regex-extracted data to apartment."""
+        # Only apply if not already set
+        if not apartment.price and "price" in data:
+            apartment.price = data["price"]
+        if not apartment.size_sqm and "size_sqm" in data:
+            apartment.size_sqm = data["size_sqm"]
+        if not apartment.rooms and "rooms" in data:
+            apartment.rooms = data["rooms"]
+
+        # Apply other fields
+        field_mappings = [
+            "betriebskosten_monthly",
+            "reparaturrucklage",
+            "floor",
+            "floor_text",
+            "year_built",
+            "condition",
+            "building_type",
+            "energy_rating",
+            "hwb_value",
+            "fgee_value",
+            "heating_type",
+            "elevator",
+            "balcony",
+            "terrace",
+            "garden",
+            "parking",
+            "cellar",
+            "storage",
+            "commission_free",
+            "commission_percent",
+        ]
+
+        for field in field_mappings:
+            if field in data and getattr(apartment, field) is None:
+                setattr(apartment, field, data[field])
+
+    def _apply_address_data(
+        self, apartment: ApartmentListing, data: Dict[str, Any]
+    ) -> None:
+        """Apply parsed address data to apartment."""
+        if data.get("street"):
+            apartment.street = data["street"]
+        if data.get("house_number"):
+            apartment.house_number = data["house_number"]
+        if data.get("door_number"):
+            apartment.door_number = data["door_number"]
+        if data.get("postal_code"):
+            apartment.postal_code = data["postal_code"]
+        if data.get("city"):
+            apartment.city = data["city"]
+        if data.get("district"):
+            apartment.district = data["district"]
+        if data.get("district_number"):
+            apartment.district_number = data["district_number"]
+        if data.get("state"):
+            apartment.state = data["state"]
+        if data.get("full_address"):
+            apartment.full_address = data["full_address"]
+
+    def _apply_llm_data(
+        self, apartment: ApartmentListing, data: Dict[str, Any]
+    ) -> None:
+        """Apply LLM-extracted data to apartment (only missing fields)."""
+        # Only fill in missing fields
+        if not apartment.title and data.get("title"):
+            apartment.title = data["title"]
+        if not apartment.price and data.get("price"):
+            apartment.price = data["price"]
+        if not apartment.size_sqm and data.get("size_sqm"):
+            apartment.size_sqm = data["size_sqm"]
+        if not apartment.rooms and data.get("rooms"):
+            apartment.rooms = data["rooms"]
+        if not apartment.bedrooms and data.get("bedrooms"):
+            apartment.bedrooms = data["bedrooms"]
+        if not apartment.bathrooms and data.get("bathrooms"):
+            apartment.bathrooms = data["bathrooms"]
+        if apartment.floor is None and data.get("floor") is not None:
+            apartment.floor = data["floor"]
+        if not apartment.year_built and data.get("year_built"):
+            apartment.year_built = data["year_built"]
+        if not apartment.condition and data.get("condition"):
+            apartment.condition = data["condition"]
+        if not apartment.building_type and data.get("building_type"):
+            apartment.building_type = data["building_type"]
+        if not apartment.energy_rating and data.get("energy_rating"):
+            apartment.energy_rating = data["energy_rating"]
+        if not apartment.heating_type and data.get("heating_type"):
+            apartment.heating_type = data["heating_type"]
+
+        # Address from LLM
+        if data.get("address") and not apartment.full_address:
+            parsed = self.address_parser.parse_address(data["address"])
+            self._apply_address_data(apartment, parsed)
+
+    def _has_missing_fields(self, apartment: ApartmentListing) -> bool:
+        """Check if apartment has important missing fields."""
+        important_fields = ["rooms", "year_built", "condition", "energy_rating"]
+        return any(getattr(apartment, f) is None for f in important_fields)
+
+    def _extract_address_from_html(self, html: str, url: str) -> Optional[str]:
+        """Extract address from HTML or URL."""
+        # Strategy 1: Look for address in JSON-LD
+        json_ld_match = re.search(
+            r'"address"[:\s]*\{[^}]*"streetAddress"[:\s]*"([^"]+)"', html
+        )
+        if json_ld_match:
+            return json_ld_match.group(1).strip()
+
+        # Strategy 2: Look for address in structured data attributes
+        # willhaben often has address in data attributes or specific divs
+        address_patterns = [
+            # Look for postal code + city pattern in text
+            r"(\d{4})\s+(Wien|Graz|Linz|Salzburg|Innsbruck|Klagenfurt|Villach)[^<]*",
+            # Look for street address pattern
+            r"([A-Za-zäöüÄÖÜß\-]+(?:straße|gasse|weg|platz|ring|allee)\s+\d+[^,<]*,\s*\d{4}\s+[A-Za-zäöüÄÖÜß\s]+)",
+            # Address label patterns
+            r"(?:Adresse|Standort|Lage)[:\s]*</[^>]+>\s*<[^>]+>([^<]+)",
+            r"(?:Adresse|Standort|Lage)[:\s]*([^<\n]{10,80})",
+        ]
+
+        for pattern in address_patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                addr = (
+                    match.group(1).strip()
+                    if match.lastindex
+                    else match.group(0).strip()
+                )
+                # Clean up HTML entities and extra whitespace
+                addr = re.sub(r"\s+", " ", addr)
+                addr = addr.replace("&nbsp;", " ").strip()
+                if len(addr) > 5 and len(addr) < 200:
+                    return addr
+
+        # Strategy 3: Extract from URL
+        # Pattern: /wien-1030-landstrasse/ or /kaernten/klagenfurt/
+        url_patterns = [
+            (
+                r"/wien-(\d{4})-([^/]+)",
+                lambda m: f"{m.group(1)} Wien, {m.group(2).replace('-', ' ').title()}",
+            ),
+            (
+                r"/(\d{4})-([^/]+)",
+                lambda m: f"{m.group(1)} {m.group(2).replace('-', ' ').title()}",
+            ),
+            (
+                r"/([a-z]+)/([a-z\-]+)/",
+                lambda m: f"{m.group(2).replace('-', ' ').title()}, {m.group(1).title()}",
+            ),
+        ]
+
+        for pattern, formatter in url_patterns:
+            match = re.search(pattern, url.lower())
+            if match:
+                return formatter(match)
+
+        return None
+
+    def _extract_title(self, html: str) -> Optional[str]:
+        """Extract title from HTML."""
+        # Try h1 tag
+        h1_match = re.search(r"<h1[^>]*>([^<]+)</h1>", html, re.IGNORECASE)
+        if h1_match:
+            title = h1_match.group(1).strip()
+            if len(title) > 5 and "cookie" not in title.lower():
+                return title
+
+        # Try og:title meta
+        og_match = re.search(
+            r'<meta property="og:title" content="([^"]+)"', html, re.IGNORECASE
+        )
+        if og_match:
+            return og_match.group(1).strip()
+
+        return None
+
+    async def process_apartment(
+        self, crawler: AsyncWebCrawler, url: str
+    ) -> Optional[ApartmentListing]:
+        """
+        Fetch and process a single apartment listing.
+
+        Args:
+            crawler: The web crawler instance
+            url: Apartment listing URL
+
+        Returns:
+            Processed ApartmentListing or None if failed/filtered
+        """
+        listing_id = self.extract_listing_id(url)
+
+        # Check for duplicates
+        if listing_id in self.seen_listings:
+            logger.debug(f"Skipping duplicate: {listing_id}")
+            return None
+
+        self.seen_listings.add(listing_id)
+
+        try:
+            result = await crawler.arun(
+                url=url,
+                wait_for="css:main",
+                delay_before_return_html=2.0,
+            )
+
+            if not result.success:
+                logger.warning(f"Failed to fetch: {url}")
+                return None
+
+            # Extract apartment data
+            apartment = await self.extract_apartment_data(result.html, url)
+            if not apartment:
+                return None
+
+            # Perform investment analysis
+            apartment = self.analyzer.analyze_apartment(apartment)
+
+            # Store all apartments - sorting and file generation happens at the end
+            self.processed_apartments.append(apartment)
+            logger.info(
+                f"Processed: {apartment.title or listing_id} "
+                f"(Score: {apartment.investment_score:.1f})"
+            )
+            return apartment
+
+        except Exception as e:
+            logger.error(f"Error processing {url}: {e}")
+            return None
+
+    async def scrape_page(
+        self, crawler: AsyncWebCrawler, page: int
+    ) -> List[ApartmentListing]:
+        """
+        Scrape a single page of listings.
+
+        Args:
+            crawler: The web crawler instance
+            page: Page number to scrape
+
+        Returns:
+            List of processed apartments from this page
+        """
+        url = self.build_willhaben_url(page)
+        logger.info(f"Scraping page {page}: {url}")
+
+        result = await crawler.arun(
+            url=url,
+            wait_for="css:section",
+            delay_before_return_html=3.0,
+            js_code="window.scrollTo(0, document.body.scrollHeight);",
+        )
+
+        if not result.success:
+            logger.error(f"Failed to scrape page {page}: {result.error_message}")
+            return []
+
+        # Extract listing URLs
+        listings = self.extract_listing_urls(result.html)
+        logger.info(f"Found {len(listings)} listings on page {page}")
+
+        if not listings:
+            return []
+
+        # Process each listing
+        page_apartments = []
+        for i, listing in enumerate(listings, 1):
+            listing_url = listing["url"]
+            logger.info(f"  [{i}/{len(listings)}] Processing: {listing_url}")
+
+            apartment = await self.process_apartment(crawler, listing_url)
+            if apartment:
+                page_apartments.append(apartment)
+
+            # Rate limiting
+            await asyncio.sleep(self.delay_apartment)
+
+        return page_apartments
+
+    async def run(self) -> List[ApartmentListing]:
+        """
+        Run the full scraping process.
+
+        Returns:
+            List of all processed apartments
+        """
+        max_pages = self.config.get("max_pages")
+        consecutive_empty_pages = 0
+        max_consecutive_empty = 2
+        page = 1
+
+        logger.info(f"Starting scrape (max_pages: {max_pages or 'unlimited'})")
+
+        async with AsyncWebCrawler(headless=True, verbose=False) as crawler:
+            while True:
+                # Check page limit
+                if max_pages and page > max_pages:
+                    logger.info(f"Reached max page limit ({max_pages})")
+                    break
+
+                # Scrape page
+                page_apartments = await self.scrape_page(crawler, page)
+
+                if page_apartments:
+                    consecutive_empty_pages = 0
+                    logger.info(
+                        f"Page {page}: {len(page_apartments)} apartments "
+                        f"(Total: {len(self.processed_apartments)})"
+                    )
+                else:
+                    consecutive_empty_pages += 1
+                    logger.info(
+                        f"Page {page}: Empty ({consecutive_empty_pages}/{max_consecutive_empty})"
+                    )
+
+                    if consecutive_empty_pages >= max_consecutive_empty:
+                        logger.info("Stopping: consecutive empty pages limit reached")
+                        break
+
+                # Rate limiting between pages
+                await asyncio.sleep(self.delay_page)
+                page += 1
+
+        logger.info(f"Scraping complete: {len(self.processed_apartments)} apartments")
+
+        # Sort and save apartments - top N to active, rest to rejected
+        self._save_apartments()
+
+        # Generate summary report
+        if self.generate_summary:
+            self._generate_summary_report()
+
+        return self.processed_apartments
+
+    def _save_apartments(self) -> None:
+        """Save apartments to files - top N to active, rest to rejected."""
+        # Sort by investment score (highest first)
+        sorted_apartments = sorted(
+            self.processed_apartments,
+            key=lambda a: a.investment_score or 0,
+            reverse=True,
+        )
+
+        # Top N go to active folder (these appear in summary)
+        active_apartments = sorted_apartments[: self.summary_top_n]
+        # Rest go to rejected folder
+        rejected_apartments = sorted_apartments[self.summary_top_n :]
+
+        logger.info(
+            f"Saving {len(active_apartments)} to active, "
+            f"{len(rejected_apartments)} to rejected"
+        )
+
+        # Save active apartments
+        for apt in active_apartments:
+            filepath = self.md_generator.generate_apartment_file(apt, rejected=False)
+            self.apartment_files[apt.listing_id] = filepath
+            logger.info(
+                f"Active: {apt.title or apt.listing_id} (Score: {apt.investment_score:.1f})"
+            )
+
+        # Save rejected apartments
+        for apt in rejected_apartments:
+            reason = f"Ranked #{sorted_apartments.index(apt) + 1} (below top {self.summary_top_n})"
+            filepath = self.md_generator.generate_apartment_file(
+                apt, rejected=True, rejection_reason=reason
+            )
+            self.apartment_files[apt.listing_id] = filepath
+            logger.debug(f"Rejected: {apt.title or apt.listing_id} - {reason}")
+
+    def _generate_summary_report(self) -> None:
+        """Generate summary report of all processed apartments."""
+        # Summary goes inside the run folder
+        summary_path = self.run_folder / "summary_report.md"
+
+        # Sort by investment score
+        sorted_apartments = sorted(
+            self.processed_apartments,
+            key=lambda a: a.investment_score or 0,
+            reverse=True,
+        )
+
+        # Generate report
+        timestamp = self.run_timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        area_ids_str = ", ".join(str(aid) for aid in self.config.get("area_ids", []))
+
+        # Calculate active/rejected counts
+        total = len(self.processed_apartments)
+        active_count = min(self.summary_top_n, total)
+        rejected_count = max(0, total - self.summary_top_n)
+
+        content = [
+            "# Investment Summary Report",
+            "",
+            f"**Generated:** {timestamp}",
+            f"**Run ID:** {self.run_id}",
+            f"**Portal:** {self.portal}",
+            f"**Area IDs:** {area_ids_str}",
+            f"**Max Price:** EUR {self.config.get('price_max', 'N/A'):,}",
+            f"**Total Scraped:** {total}",
+            f"**Active (Top {self.summary_top_n}):** {active_count}",
+            f"**Rejected:** {rejected_count}",
+            "",
+            "---",
+            "",
+            f"## Top {active_count} Investment Opportunities",
+            "",
+            "| Rank | Score | Recommendation | Price | Size | Yield | Location | Details | Source |",
+            "|------|-------|----------------|-------|------|-------|----------|---------|--------|",
+        ]
+
+        for i, apt in enumerate(sorted_apartments[: self.summary_top_n], 1):
+            price = f"EUR {apt.price:,.0f}" if apt.price else "N/A"
+            size = f"{apt.size_sqm:.0f}m2" if apt.size_sqm else "N/A"
+            yield_str = f"{apt.gross_yield:.1f}%" if apt.gross_yield else "N/A"
+            recommendation = apt.recommendation or "N/A"
+
+            # Build location string with postal code, city, district
+            location_parts = []
+            if apt.postal_code:
+                location_parts.append(apt.postal_code)
+            if apt.city:
+                location_parts.append(apt.city)
+            if apt.district_number and apt.city and apt.city.lower() == "wien":
+                location_parts.append(f"Bez.{apt.district_number}")
+            elif apt.district:
+                location_parts.append(apt.district)
+            location = " ".join(location_parts) if location_parts else "N/A"
+
+            # Get local file link (relative to summary report in same folder)
+            local_file = self.apartment_files.get(apt.listing_id, "")
+            if local_file:
+                filename = Path(local_file).name
+                details_link = f"[Details](active/{filename})"
+            else:
+                details_link = "-"
+
+            content.append(
+                f"| {i} | {apt.investment_score:.1f} | {recommendation} | "
+                f"{price} | {size} | {yield_str} | {location} | "
+                f"{details_link} | [Source]({apt.source_url}) |"
+            )
+
+        content.append("")
+        content.append("---")
+        content.append("")
+        content.append("*Generated by Enhanced Apartment Scraper*")
+
+        # Write report
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(summary_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(content))
+
+        logger.info(f"Summary report saved: {summary_path}")
+
+
+async def load_config() -> Dict[str, Any]:
     """Load configuration from config.json"""
     config_path = Path(__file__).parent / "config.json"
     with open(config_path, "r", encoding="utf-8") as f:
@@ -22,10 +698,6 @@ async def load_config():
             raise ValueError("Missing required field 'area_ids' for willhaben portal")
         if "price_max" not in config:
             raise ValueError("Missing required field 'price_max' for willhaben portal")
-        if not isinstance(config["area_ids"], list):
-            raise ValueError("Field 'area_ids' must be a list of integers")
-        if not isinstance(config["price_max"], (int, float)):
-            raise ValueError("Field 'price_max' must be a number")
 
     # Ensure output folder exists
     output_folder = Path(__file__).parent / config.get("output_folder", "output")
@@ -34,364 +706,26 @@ async def load_config():
     return config
 
 
-def build_willhaben_url(area_ids: list, price_max: int, page: int = 1) -> str:
-    """
-    Build willhaben.at search URL from configuration parameters
-
-    Args:
-        area_ids: List of postal code area IDs (e.g., [201, 202, 203])
-        price_max: Maximum price threshold
-        page: Page number for pagination (default: 1)
-
-    Returns:
-        Complete willhaben.at search URL with query parameters
-    """
-    base_url = "https://www.willhaben.at/iad/immobilien/eigentumswohnung/eigentumswohnung-angebote"
-
-    # Build query parameters
-    params = []
-
-    # Add area IDs
-    for area_id in area_ids:
-        params.append(f"areaId={area_id}")
-
-    # Add price threshold
-    params.append(f"PRICE_TO={int(price_max)}")
-
-    # Add pagination parameter
-    params.append(f"page={page}")
-
-    # Add navigation flag (based on existing URL pattern)
-    params.append("isNavigation=true")
-
-    # Combine into final URL
-    url = f"{base_url}?{'&'.join(params)}"
-
-    return url
-
-
-async def scrape_apartments(url: str, page: int = 1) -> list:
-    """
-    Scrape apartment listings from willhaben.at
-
-    Args:
-        url: The filtered willhaben.at URL with search parameters
-        page: Current page number being scraped
-
-    Returns:
-        List of apartment dictionaries with extracted data
-    """
-    print(f"🏠 Scraping apartments from page {page}...")
-    print(f"📍 Target URL: {url}")
-
-    # Crawl the webpage
-    async with AsyncWebCrawler(headless=True, verbose=True) as crawler:
-        print("🌐 Crawling webpage...")
-
-        result = await crawler.arun(
-            url=url,
-            wait_for="css:section",
-            delay_before_return_html=3.0,
-            js_code="window.scrollTo(0, document.body.scrollHeight);",
-        )
-
-        if not result.success:
-            print(f"❌ Crawl failed: {result.error_message}")
-            return []
-
-        print("✅ Webpage crawled successfully")
-        print(f"📄 HTML length: {len(result.html)} chars")
-
-        # Extract JSON-LD structured data
-        print("🔍 Extracting apartment data from structured data...")
-        apartments = extract_apartments_from_html(result.html)
-
-        if apartments:
-            print(f"📊 Found {len(apartments)} apartments from JSON-LD on page {page}")
-
-            # Now fetch details for each apartment
-            print("📝 Fetching detailed information for each apartment...")
-            detailed_apartments = []
-
-            for i, apt in enumerate(apartments, 1):
-                url = apt.get("url", "")
-                if url:
-                    print(f"  [{i}/{len(apartments)}] Fetching: {url}")
-                    details = await fetch_apartment_details(crawler, url)
-                    if details:
-                        detailed_apartments.append(details)
-                    # Small delay to be polite
-                    await asyncio.sleep(0.5)
-
-            return detailed_apartments
-        else:
-            print(f"⚠️ No apartments found on page {page}")
-            return []
-
-
-def extract_apartments_from_html(html: str) -> list:
-    """Extract apartment URLs from JSON-LD structured data"""
-    try:
-        # Find the JSON-LD script tag
-        match = re.search(
-            r'<script type="application/ld\+json">({.*?"@type":"ItemList".*?})</script>',
-            html,
-            re.DOTALL,
-        )
-        if match:
-            json_data = json.loads(match.group(1))
-            items = json_data.get("itemListElement", [])
-            return [
-                {"url": f"https://www.willhaben.at{item.get('url', '')}"}
-                for item in items
-                if item.get("url")
-            ]
-    except Exception as e:
-        print(f"⚠️ Error extracting JSON-LD: {e}")
-
-    return []
-
-
-async def fetch_apartment_details(crawler, url: str) -> dict:
-    """Fetch details for a single apartment"""
-    try:
-        result = await crawler.arun(
-            url=url, wait_for="css:main", delay_before_return_html=2.0
-        )
-
-        if not result.success:
-            return None
-
-        html = result.html
-
-        # Filter out ads - check for star icon SVG path (indicates real listing)
-        star_icon_path = "m12 4 2.09 4.25a1.52 1.52 0 0 0 1.14.82l4.64.64-3.42 3.32"
-        if star_icon_path not in html:
-            # This is an ad or promoted listing without the star icon
-            return None
-
-        # Extract details from the page
-        details = {
-            "link": url,
-            "title": "N/A",
-            "price": "N/A",
-            "square_meters": "N/A",
-            "price_per_sqm": "N/A",
-            "energy_class": "N/A",
-            "location": "N/A",
-        }
-
-        markdown = result.markdown
-
-        # Extract title from markdown (cleaner) - skip cookie/generic text
-        title_match = re.search(r"^## (.+)$", markdown, re.MULTILINE)
-        if title_match:
-            title = title_match.group(1).strip()
-            # Skip generic titles
-            if "cookie" not in title.lower() and title != "N/A":
-                # Replace pipes with dash to avoid breaking markdown table formatting
-                details["title"] = title.replace("|", "—")
-
-        # Extract price - look for JSON-LD data (more reliable)
-        price_match = re.search(r'"price"[:\s]*"?(\d+(?:\.\d+)*)"?', html)
-        if price_match:
-            price_val = float(price_match.group(1))
-            details["price"] = f"€ {int(price_val):,}".replace(",", ".")
-
-        # Extract square meters
-        sqm_match = re.search(r"(\d+(?:,\d+)?)\s*m²", html)
-        if sqm_match:
-            sqm_val = sqm_match.group(1).replace(",", ".")
-            details["square_meters"] = f"{sqm_val} m²"
-
-            # Calculate price per sqm if we have both
-            if price_match:
-                try:
-                    price_num = float(price_match.group(1))
-                    sqm_num = float(sqm_val)
-                    price_per_sqm = price_num / sqm_num
-                    details["price_per_sqm"] = f"€ {price_per_sqm:,.0f}/m²".replace(
-                        ",", "."
-                    )
-                except:
-                    pass
-
-        # Extract energy class
-        energy_match = re.search(
-            r"Energie[kK]lasse[:\s]*([A-G][+]?)", html, re.IGNORECASE
-        )
-        if energy_match:
-            details["energy_class"] = energy_match.group(1)
-
-        # Extract location from URL
-        if "wien" in url.lower():
-            # Extract district from URL pattern like "wien-1030-landstrasse"
-            # Vienna postal codes: 1030 = 3rd district, 1050 = 5th, etc.
-            # Pattern: last 2 digits / 10 = district (30/10=3, 50/10=5, 20/10=2)
-            district_match = re.search(r"/wien-\d{2}(\d{2})-", url)
-            if district_match:
-                last_two = int(district_match.group(1))
-                district_num = last_two // 10  # Integer division: 30//10=3, 50//10=5
-                details["location"] = f"Wien, {district_num}. Bezirk"
-            else:
-                details["location"] = "Wien"
-        elif "klagenfurt" in url.lower():
-            details["location"] = "Klagenfurt"
-        elif "villach" in url.lower():
-            details["location"] = "Villach"
-
-        return details
-
-    except Exception as e:
-        print(f"    ⚠️ Error fetching {url}: {e}")
-        return None
-
-
-def generate_markdown(apartments: list, config: dict, url: str) -> str:
-    """
-    Generate markdown formatted output for apartment listings
-
-    Args:
-        apartments: List of apartment dictionaries
-        config: Configuration dictionary with portal settings
-        url: Generated search URL
-
-    Returns:
-        Markdown formatted string
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Format area IDs for display
-    area_ids_str = ", ".join(str(aid) for aid in config.get("area_ids", []))
-
-    md_content = f"""# Willhaben.at Apartment Investment Opportunities
-
-**Generated:** {timestamp}
-**Portal:** {config.get("portal", "N/A")}
-**Area IDs (PLZ):** {area_ids_str}
-**Max Price:** € {config.get("price_max", "N/A"):,}
-**Total Listings Found:** {len(apartments)}
-
-<details>
-<summary>Search URL</summary>
-
-{url}
-</details>
-
----
-
-## Apartment Listings
-
-| Title | Price | m² | €/m² | Energy Class | Location | Link |
-|-------|-------|-----|------|--------------|----------|------|
-"""
-
-    for apt in apartments:
-        title = (
-            apt.get("title", "N/A")[:50] + "..."
-            if len(apt.get("title", "")) > 50
-            else apt.get("title", "N/A")
-        )
-        price = apt.get("price", "N/A")
-        sqm = apt.get("square_meters", "N/A")
-        price_per_sqm = apt.get("price_per_sqm", "N/A")
-        energy_class = apt.get("energy_class", "N/A")
-        location = apt.get("location", "N/A")
-        link = apt.get("link", "#")
-
-        md_content += f"| {title} | {price} | {sqm} | {price_per_sqm} | {energy_class} | {location} | [View]({link}) |\n"
-
-    if not apartments:
-        md_content += "| No apartments found | - | - | - | - | - | - |\n"
-
-    md_content += "\n---\n\n*Data extracted using crawl4ai*\n"
-
-    return md_content
-
-
 async def main():
-    """Main entry point for the apartment scraper"""
+    """Main entry point for the apartment scraper."""
     try:
-        # Load configuration
         config = await load_config()
-        output_folder = config.get("output_folder", "output")
-        max_pages = config.get("max_pages", None)  # None means unlimited
 
-        # Build URL based on portal configuration
         if config["portal"] != "willhaben":
-            print(f"❌ Error: Unsupported portal '{config['portal']}'")
+            logger.error(f"Unsupported portal: {config['portal']}")
             return
 
-        # Scrape apartments from all pages
-        all_apartments = []
-        page = 1
-        consecutive_empty_pages = 0
-        max_consecutive_empty = 2  # Stop if we get 2 empty pages in a row
+        scraper = EnhancedApartmentScraper(config)
+        apartments = await scraper.run()
 
-        print(
-            f"🔄 Starting pagination (max_pages: {max_pages if max_pages else 'unlimited'})"
+        logger.info(
+            f"Scraping complete! Found {len(apartments)} investment opportunities."
         )
-
-        while True:
-            # Check if we've reached the max page limit
-            if max_pages and page > max_pages:
-                print(f"🛑 Reached maximum page limit ({max_pages})")
-                break
-
-            # Build URL for current page
-            url = build_willhaben_url(
-                area_ids=config["area_ids"], price_max=config["price_max"], page=page
-            )
-
-            # Scrape apartments from current page
-            page_apartments = await scrape_apartments(url, page)
-
-            # If we found apartments, add them and reset empty counter
-            if page_apartments:
-                all_apartments.extend(page_apartments)
-                consecutive_empty_pages = 0
-                print(
-                    f"✅ Page {page}: Found {len(page_apartments)} apartments (Total: {len(all_apartments)})"
-                )
-            else:
-                consecutive_empty_pages += 1
-                print(
-                    f"⚠️ Page {page}: No apartments found ({consecutive_empty_pages}/{max_consecutive_empty} empty pages)"
-                )
-
-                # Stop if we hit too many consecutive empty pages
-                if consecutive_empty_pages >= max_consecutive_empty:
-                    print(
-                        f"🛑 Stopping: {max_consecutive_empty} consecutive empty pages detected"
-                    )
-                    break
-
-            # Add a small delay between pages to be polite
-            if page_apartments or consecutive_empty_pages < max_consecutive_empty:
-                await asyncio.sleep(1.0)
-
-            page += 1
-
-        print(f"\n📊 Pagination complete! Processed {page - 1} pages")
-        print(f"📝 Total apartments collected: {len(all_apartments)}")
-
-        # Generate markdown output with base URL (without page parameter for display)
-        base_url = build_willhaben_url(
-            area_ids=config["area_ids"], price_max=config["price_max"], page=1
-        )
-        markdown_content = generate_markdown(all_apartments, config, base_url)
-
-        # Write to file in output folder
-        output_file = Path(__file__).parent / output_folder / "apartments.md"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(markdown_content)
-
-        print(f"✅ Success! Apartment listings saved to: {output_file}")
 
     except FileNotFoundError:
-        print("❌ Error: config.json not found")
+        logger.error("config.json not found")
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        logger.error(f"Unexpected error: {e}")
         import traceback
 
         traceback.print_exc()

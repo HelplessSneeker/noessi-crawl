@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**noessi-crawl** is a Python-based web crawler for extracting apartment listings from willhaben.at (Austrian real estate portal). It uses crawl4ai with Playwright to scrape property data and generate markdown reports for investment analysis.
+**noessi-crawl** is a Python-based web crawler for extracting apartment listings from willhaben.at (Austrian real estate portal). It features:
+- Multi-strategy data extraction (JSON-LD, regex, optional LLM)
+- Investment analysis with scoring and recommendations
+- Individual markdown files with YAML frontmatter for each listing
+- Configurable filtering and analysis parameters
 
 ## Development Environment
 
@@ -13,6 +17,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Key Dependencies**: 
   - crawl4ai >= 0.7.7 (core crawling framework)
   - playwright >= 1.56.0 (browser automation)
+  - httpx >= 0.27.0 (async HTTP for Ollama)
+  - pyyaml >= 6.0 (YAML frontmatter generation)
 
 ## Setup Commands
 
@@ -22,61 +28,154 @@ uv sync
 
 # Install Playwright browsers (required for crawl4ai to work)
 playwright install
+
+# Optional: Install Ollama for LLM extraction
+# See https://ollama.ai for installation
+# Then pull a model: ollama pull qwen3:8b
 ```
 
 ## Running the Apartment Scraper
 
 ```bash
-# Run the scraper (outputs to output/apartments.md)
+# Run the scraper
 uv run python main.py
 ```
 
-The scraper reads configuration from `config.json` and:
-1. Builds willhaben.at search URL from config parameters (area_ids, price_max)
-2. Crawls paginated listing pages until no more results found
-3. Extracts apartment URLs from JSON-LD structured data
-4. Fetches individual apartment pages for detailed information
-5. Filters out ads (checks for star icon SVG path)
-6. Extracts: title, price, square meters, price/m², energy class, location
-7. Generates a markdown table in `output/apartments.md`
-
-## Configuration
-
-Edit `config.json` to customize:
-- `portal`: Portal name (currently only "willhaben" supported)
-- `area_ids`: List of postal code area IDs (e.g., [201, 202, 203] for specific regions)
-- `price_max`: Maximum price threshold in euros
-- `output_folder`: Folder where apartments.md will be saved (default: "output")
-- `max_pages`: Maximum pages to scrape (null = unlimited, stops after 2 consecutive empty pages)
+Output is generated in `output/apartments/active/` as individual markdown files.
 
 ## Project Structure
 
-- `main.py`: Main scraper with async crawling and data extraction
-- `config.json`: Configuration file (URL, output folder)
-- `output/`: Generated files folder (gitignored)
-  - `apartments.md`: Apartment listings table
-- `tests/`: Test scripts for debugging extraction logic
+```
+noessi-crawl/
+├── main.py                 # EnhancedApartmentScraper main entry point
+├── config.json             # Configuration file
+├── models/                 # Data models
+│   ├── __init__.py
+│   ├── apartment.py        # ApartmentListing dataclass (~50 fields)
+│   └── constants.py        # Austrian real estate constants
+├── utils/                  # Utility modules
+│   ├── __init__.py
+│   ├── extractors.py       # AustrianRealEstateExtractor (regex patterns)
+│   ├── address_parser.py   # AustrianAddressParser
+│   └── markdown_generator.py  # MarkdownGenerator
+├── llm/                    # LLM integration (optional)
+│   ├── __init__.py
+│   ├── extractor.py        # OllamaExtractor
+│   └── analyzer.py         # InvestmentAnalyzer
+├── output/                 # Generated files (gitignored)
+│   ├── apartments/
+│   │   ├── active/         # Accepted listings
+│   │   └── rejected/       # Filtered-out listings
+│   └── summary_report.md   # Investment summary
+└── tests/                  # Test scripts
+```
+
+## Configuration
+
+Edit `config.json` to customize behavior:
+
+### Basic Settings
+- `portal`: Portal name (currently only "willhaben" supported)
+- `area_ids`: List of postal code area IDs
+- `price_max`: Maximum price threshold in euros
+- `output_folder`: Output directory (default: "output")
+- `max_pages`: Max pages to scrape (null = unlimited)
+
+### Extraction Settings
+```json
+"extraction": {
+  "use_llm": false,           // Enable Ollama LLM extraction
+  "llm_model": "qwen3:8b",    // Ollama model to use
+  "fallback_to_regex": true   // Use regex if LLM fails
+}
+```
+
+### Investment Filters
+```json
+"filters": {
+  "min_yield": 3.5,           // Minimum gross yield %
+  "max_price": 300000,        // Price cap
+  "min_size_sqm": 50,         // Size range
+  "max_size_sqm": 120,
+  "excluded_districts": [],   // Vienna districts to skip
+  "min_investment_score": 5.0 // Minimum score (0-10)
+}
+```
+
+### Analysis Parameters
+```json
+"analysis": {
+  "mortgage_rate": 3.5,       // Annual rate %
+  "down_payment_percent": 30,
+  "transaction_cost_percent": 9,
+  "estimated_rent_per_sqm": {
+    "vienna_inner": 16.0,
+    "vienna_outer": 13.0
+  }
+}
+```
 
 ## Architecture Notes
 
-### Data Extraction Approach
+### Data Extraction Pipeline
 
-The scraper uses a multi-phase approach:
-1. **URL building**: Constructs willhaben.at search URLs from config parameters (area_ids, price_max)
-2. **Pagination**: Automatically crawls multiple pages until 2 consecutive empty pages found
-3. **List pages**: Extracts apartment URLs from JSON-LD structured data in search results
-4. **Detail pages**: Fetches each apartment page and extracts details using regex patterns
+Multi-strategy extraction in priority order:
+1. **JSON-LD**: Structured data from script tags (most reliable)
+2. **Regex**: Pattern matching for German real estate terminology
+3. **LLM**: Ollama extraction for missing fields (optional)
 
-### Key Implementation Details
+### ApartmentListing Model
 
-- **URL construction**: Builds search URLs from `area_ids` (postal codes) and `price_max` parameters
-- **Automatic pagination**: Continues scraping pages until no more results (2 consecutive empty pages)
-- **Vienna district codes**: Postal codes like 1030 encode district as `(code % 100) / 10` (1030 → 3rd district)
-- **Price extraction**: Uses JSON-LD `"price"` field from structured data (more reliable than HTML scraping)
-- **Rate limiting**: 0.5 second delay between apartment requests, 1.0 second between pages
-- **Async operations**: Built on asyncio with crawl4ai's AsyncWebCrawler
-- **Ad filtering**: Excludes promoted listings by checking for star icon SVG in HTML
+The `ApartmentListing` dataclass contains ~50 fields including:
+- Core: listing_id, source_url, title, price, size_sqm
+- Location: street, district, postal_code, city, state
+- Financial: betriebskosten, reparaturrucklage, price_per_sqm
+- Features: elevator, balcony, terrace, parking, energy_rating
+- Investment: estimated_rent, gross_yield, net_yield, investment_score
 
-### LLM Note
+### Investment Scoring (0-10 scale)
 
-Originally designed to use LLM extraction (Ollama/llama2), but the current version uses direct HTML/regex extraction which proved more reliable and faster for structured willhaben.at pages.
+Balanced scoring with max 10.0:
+- Base score: 5.0
+- Yield bonus: up to +1.5
+- Price vs market: up to +1.0  
+- Operating costs: up to +0.5
+- Condition: up to +0.5
+- Energy: up to +0.5
+- Features: up to +0.5
+- Cash flow: up to +0.5
+- Penalties for poor factors
+
+Recommendations: STRONG BUY (8+), BUY (6.5+), CONSIDER (5+), WEAK (3.5+), AVOID (<3.5)
+
+### Austrian-Specific Features
+
+- Vienna district extraction from postal codes (1030 -> 3rd district)
+- Complete Vienna district rent multipliers (1-23)
+- MRG (Mietrechtsgesetz) rent control detection for pre-1945 buildings
+- German real estate terminology patterns (Betriebskosten, Erstbezug, etc.)
+- Transaction cost calculation (Grunderwerbsteuer, Grundbuch, Notar)
+
+### Rate Limiting
+
+Configurable delays to be polite:
+- `delay_apartment`: 0.5s between apartment fetches
+- `delay_page`: 1.0s between listing pages
+
+### Output Format
+
+Each apartment generates a markdown file with:
+- YAML frontmatter (all structured data)
+- Investment summary and score
+- Financial analysis table
+- Property details and features
+- Risk/positive factors
+- Next steps checklist
+
+## Testing
+
+```bash
+# Run existing tests
+uv run python tests/test_simple.py
+uv run python tests/test_single.py
+```

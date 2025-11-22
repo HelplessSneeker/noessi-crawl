@@ -3,5 +3,51 @@
   "area_ids": [201, 202, 117223, 117224, 117225, 117226, 117227, 117228],
   "price_max": 200000,
   "output_folder": "output",
-  "max_pages": null
+  "max_pages": null,
+
+  "extraction": {
+    "use_llm": false,
+    "llm_model": "qwen3:8b",
+    "fallback_to_regex": false,
+    "cache_extracted": false
+  },
+
+  "filters": {
+    "min_yield": null,
+    "max_price": null,
+    "min_size_sqm": null,
+    "max_size_sqm": null,
+    "excluded_districts": [],
+    "max_betriebskosten_per_sqm": null,
+    "exclude_renovierung_needed": false,
+    "exclude_poor_energy": false,
+    "min_investment_score": null
+  },
+
+  "analysis": {
+    "mortgage_rate": 3.5,
+    "down_payment_percent": 30,
+    "transaction_cost_percent": 9,
+    "loan_term_years": 25,
+    "estimated_rent_per_sqm": {
+      "default": 12.0,
+      "vienna_inner": 16.0,
+      "vienna_outer": 13.0,
+      "graz": 11.0,
+      "linz": 10.5,
+      "salzburg": 14.0
+    }
+  },
+
+  "output": {
+    "format": "individual_markdown",
+    "include_rejected": false,
+    "generate_summary": true,
+    "summary_top_n": 20
+  },
+
+  "rate_limiting": {
+    "delay_apartment": 0.5,
+    "delay_page": 1.0
+  }
 }
