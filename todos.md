@@ -4,11 +4,11 @@ this file cmoposes todos i define and notes for edits i want to make in the futu
 
 ## Notes
 
-Adress Line in summary is still not working needs to be fixed
-adress line in detail just shows city and not city plus adress
+Adress line in detail is working somwhat the first line is wrong but the seccond works
+summarry adresses are not working needs fixing
 
 ## Todos
 
-implement proper ai utalization
+the improvement ai brings is not really clear to me the one without looks somewaht simmilar should investigate
 implement immoscout24 portal support
-get ovberview over criteria
+get overview over criteria

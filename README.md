@@ -256,6 +256,9 @@ noessi-crawl/
 1. **JSON-LD** (primary): Extracts structured data from script tags
 2. **Regex patterns** (fallback): German real estate terminology
 3. **LLM extraction** (optional): Ollama for missing fields
+   - Robust timeout handling (10s connect, 120s read, 180s hard timeout)
+   - Comprehensive logging for visibility and debugging
+   - Graceful failures - continues without LLM data if unavailable
 
 ### Austrian-Specific Features
 
@@ -276,7 +279,12 @@ noessi-crawl/
 - **Async operations**: Python asyncio with crawl4ai's AsyncWebCrawler
 - **Headless browser**: Playwright for JavaScript rendering
 - **Multi-strategy extraction**: JSON-LD → Regex → LLM
-- **Error handling**: Graceful failures with logging
+- **Error handling**: Graceful failures with comprehensive logging
+- **Timeout protection**: Multiple layers prevent indefinite hangs
+  - Connect timeout: 10s (Ollama availability checks)
+  - Read timeout: 120s (LLM inference time)
+  - Hard timeout: 180s (entire LLM operation via asyncio.wait_for)
+- **Progress tracking**: Detailed logs show extraction strategy, progress, timing, and errors
 
 ## Dependencies
 
@@ -285,6 +293,37 @@ Key packages (see `pyproject.toml`):
 - `playwright >= 1.56.0` - Browser automation
 - `httpx >= 0.27.0` - Async HTTP (for Ollama)
 - `pyyaml >= 6.0` - YAML frontmatter
+
+## Troubleshooting
+
+### LLM Extraction Issues
+
+**Scraper hangs when `use_llm: true`:**
+- Ensure Ollama is running: `curl http://localhost:11434/api/tags`
+- Check logs - will show "Checking Ollama availability..." and timeout after 10s if unreachable
+- Hard timeout (180s) prevents indefinite hangs
+- Look for "Cannot connect to Ollama" or "Ollama timeout" in logs
+
+**LLM extraction fails:**
+- Verify Ollama is installed and running
+- Check model is available: `ollama list` (should show `qwen3:8b` or your configured model)
+- Pull model if missing: `ollama pull qwen3:8b`
+- Scraper continues gracefully without LLM data on failures
+
+**Monitoring Progress:**
+- Logs show detailed progress: "Processing apartment (Total so far: X)"
+- LLM operations logged: availability checks, extraction attempts (1/3, 2/3, 3/3), success/failures
+- Timing information helps identify bottlenecks
+
+### Other Issues
+
+**No listings found:**
+- Verify `postal_codes` or `area_ids` are correct in config.json
+- Check `max_pages` isn't too restrictive
+
+**Failed to fetch pages:**
+- Ensure Playwright browsers are installed: `playwright install`
+- Check network connectivity
 
 ## Limitations
 
