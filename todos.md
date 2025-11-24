@@ -11,3 +11,4 @@ adress line in detail just shows city and not city plus adress
 
 implement proper ai utalization
 implement immoscout24 portal support
+get ovberview over criteria

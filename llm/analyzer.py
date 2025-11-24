@@ -152,19 +152,19 @@ class InvestmentAnalyzer:
             if apartment.gross_yield >= 5.5:
                 score += 1.5
                 positive_factors.append(
-                    f"Excellent yield: {apartment.gross_yield:.1f}%"
+                    f"Ausgezeichnete Rendite: {apartment.gross_yield:.1f}%"
                 )
             elif apartment.gross_yield >= 4.5:
                 score += 1.0
-                positive_factors.append(f"Good yield: {apartment.gross_yield:.1f}%")
+                positive_factors.append(f"Gute Rendite: {apartment.gross_yield:.1f}%")
             elif apartment.gross_yield >= 3.5:
                 score += 0.5
                 positive_factors.append(
-                    f"Acceptable yield: {apartment.gross_yield:.1f}%"
+                    f"Akzeptable Rendite: {apartment.gross_yield:.1f}%"
                 )
             elif apartment.gross_yield < 2.5:
                 score -= 1.0
-                risk_factors.append(f"Low yield: {apartment.gross_yield:.1f}%")
+                risk_factors.append(f"Niedrige Rendite: {apartment.gross_yield:.1f}%")
 
         # === Price vs market (up to +1.0) ===
         if apartment.price_per_sqm and apartment.district_number:
@@ -174,26 +174,26 @@ class InvestmentAnalyzer:
                 if price_ratio < 0.85:
                     score += 1.0
                     positive_factors.append(
-                        f"Below market price ({price_ratio:.0%} of avg)"
+                        f"Unter Marktpreis ({price_ratio:.0%} vom Durchschnitt)"
                     )
                 elif price_ratio < 0.95:
                     score += 0.5
-                    positive_factors.append("Competitive price")
+                    positive_factors.append("Wettbewerbsfähiger Preis")
                 elif price_ratio > 1.15:
                     score -= 0.5
                     risk_factors.append(
-                        f"Above market price ({price_ratio:.0%} of avg)"
+                        f"Über Marktpreis ({price_ratio:.0%} vom Durchschnitt)"
                     )
 
         # === Operating costs (up to +0.5) ===
         if apartment.betriebskosten_per_sqm:
             if apartment.betriebskosten_per_sqm < 2.0:
                 score += 0.5
-                positive_factors.append("Low operating costs")
+                positive_factors.append("Niedrige Betriebskosten")
             elif apartment.betriebskosten_per_sqm > 4.0:
                 score -= 0.5
                 risk_factors.append(
-                    f"High operating costs ({apartment.betriebskosten_per_sqm:.2f} EUR/m2)"
+                    f"Hohe Betriebskosten ({apartment.betriebskosten_per_sqm:.2f} EUR/m²)"
                 )
 
         # === Condition (up to +0.5) ===
@@ -203,19 +203,21 @@ class InvestmentAnalyzer:
 
             if apartment.condition in good_conditions:
                 score += 0.5
-                positive_factors.append(f"Good condition: {apartment.condition}")
+                positive_factors.append(f"Guter Zustand: {apartment.condition}")
             elif apartment.condition in bad_conditions:
                 score -= 1.0
-                risk_factors.append("Needs renovation")
+                risk_factors.append("Renovierung erforderlich")
 
         # === Energy efficiency (up to +0.5) ===
         if apartment.energy_rating:
             if apartment.energy_rating in ["A++", "A+", "A", "B"]:
                 score += 0.5
-                positive_factors.append(f"Energy efficient ({apartment.energy_rating})")
+                positive_factors.append(f"Energieeffizient ({apartment.energy_rating})")
             elif apartment.energy_rating in ["F", "G"]:
                 score -= 0.5
-                risk_factors.append(f"Poor energy rating ({apartment.energy_rating})")
+                risk_factors.append(
+                    f"Schlechte Energieeffizienz ({apartment.energy_rating})"
+                )
 
         # === Features (up to +0.5) ===
         feature_count = sum(
@@ -230,40 +232,42 @@ class InvestmentAnalyzer:
         )
         if feature_count >= 4:
             score += 0.5
-            positive_factors.append(f"Well-equipped ({feature_count} features)")
+            positive_factors.append(
+                f"Gut ausgestattet ({feature_count} Ausstattungsmerkmale)"
+            )
         elif feature_count == 0:
-            risk_factors.append("No notable features")
+            risk_factors.append("Keine besonderen Ausstattungsmerkmale")
 
         # === Cash flow (up to +0.5) ===
         if apartment.cash_flow_monthly is not None:
             if apartment.cash_flow_monthly > 200:
                 score += 0.5
                 positive_factors.append(
-                    f"Positive cash flow (+{apartment.cash_flow_monthly:.0f} EUR/month)"
+                    f"Positiver Cashflow (+{apartment.cash_flow_monthly:.0f} EUR/Monat)"
                 )
             elif apartment.cash_flow_monthly > 0:
                 score += 0.25
-                positive_factors.append("Slightly positive cash flow")
+                positive_factors.append("Leicht positiver Cashflow")
             elif apartment.cash_flow_monthly < -300:
                 score -= 0.5
                 risk_factors.append(
-                    f"Negative cash flow ({apartment.cash_flow_monthly:.0f} EUR/month)"
+                    f"Negativer Cashflow ({apartment.cash_flow_monthly:.0f} EUR/Monat)"
                 )
 
         # === MRG risk assessment ===
         if apartment.year_built and apartment.year_built < MRG_BUILDING_CUTOFF_YEAR:
             apartment.mrg_applicable = True
-            risk_factors.append("MRG rent control may apply (pre-1945 building)")
+            risk_factors.append("MRG-Mietpreisbindung könnte gelten (Vorkriegsbau)")
             score -= 0.25
 
         # === Commission consideration ===
         if apartment.commission_free:
             score += 0.25
-            positive_factors.append("Commission-free")
+            positive_factors.append("Provisionsfrei")
 
         # === Elevator for upper floors ===
         if apartment.floor and apartment.floor >= 3 and not apartment.elevator:
-            risk_factors.append("High floor without elevator")
+            risk_factors.append("Hohe Etage ohne Aufzug")
             score -= 0.25
 
         # Clamp score to 0-10 range

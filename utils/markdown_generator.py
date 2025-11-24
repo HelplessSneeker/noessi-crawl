@@ -8,6 +8,18 @@ from typing import Any, Dict, Optional
 import yaml
 
 from models.apartment import ApartmentListing
+from utils.translations import (
+    BOOLEAN,
+    BUILDING_TYPE_TRANSLATIONS,
+    CONDITION_TRANSLATIONS,
+    HEADERS,
+    HEATING_TRANSLATIONS,
+    LABELS,
+    NEXT_STEPS,
+    PARKING_TRANSLATIONS,
+    PHRASES,
+    RECOMMENDATIONS,
+)
 
 
 class MarkdownGenerator:
@@ -292,16 +304,16 @@ class MarkdownGenerator:
         content = []
 
         # Title
-        title = apartment.title or f"Apartment in {apartment.city or 'Unknown'}"
+        title = apartment.title or f"Wohnung in {apartment.city or 'Unbekannt'}"
         content.append(f"# {title}\n")
 
         # Executive summary
-        content.append("## Summary\n")
+        content.append(f"## {HEADERS['investment_summary']}\n")
         summary_parts = []
         if apartment.size_sqm:
-            summary_parts.append(f"{apartment.size_sqm:.0f} m2")
+            summary_parts.append(f"{apartment.size_sqm:.0f} m²")
         if apartment.rooms:
-            summary_parts.append(f"{apartment.rooms} rooms")
+            summary_parts.append(f"{apartment.rooms} {LABELS['rooms']}")
         if apartment.price:
             summary_parts.append(f"EUR {apartment.price:,.0f}")
         if apartment.district:
@@ -313,62 +325,78 @@ class MarkdownGenerator:
             content.append(" | ".join(summary_parts) + "\n")
 
         if apartment.recommendation and apartment.investment_score:
+            # Translate recommendation to German
+            recommendation_de = RECOMMENDATIONS.get(
+                apartment.recommendation, apartment.recommendation
+            )
             content.append(
-                f"\n**Investment Score: {apartment.investment_score:.1f}/10** - "
-                f"**{apartment.recommendation}**\n"
+                f"\n**{LABELS['investment_score']}: {apartment.investment_score:.1f}/10** - "
+                f"**{recommendation_de}**\n"
             )
 
         # Financial analysis
-        content.append("\n## Financial Analysis\n")
-        content.append("| Metric | Value |")
+        content.append(f"\n## {HEADERS['financial_analysis']}\n")
+        content.append(f"| Kennzahl | Wert |")
         content.append("|--------|-------|")
 
         if apartment.price:
-            content.append(f"| Purchase Price | EUR {apartment.price:,.0f} |")
+            content.append(f"| {LABELS['price']} | EUR {apartment.price:,.0f} |")
         if apartment.price_per_sqm:
-            content.append(f"| Price/m2 | EUR {apartment.price_per_sqm:,.0f} |")
+            content.append(
+                f"| {LABELS['price_per_sqm']} | EUR {apartment.price_per_sqm:,.0f} |"
+            )
         if apartment.betriebskosten_monthly:
             content.append(
-                f"| Operating Costs | EUR {apartment.betriebskosten_monthly:,.0f}/month |"
+                f"| {LABELS['betriebskosten']} | EUR {apartment.betriebskosten_monthly:,.0f}/Monat |"
             )
         if apartment.estimated_rent:
             content.append(
-                f"| Estimated Rent | EUR {apartment.estimated_rent:,.0f}/month |"
+                f"| {LABELS['estimated_rent']} | EUR {apartment.estimated_rent:,.0f}/Monat |"
             )
         if apartment.gross_yield:
-            content.append(f"| Gross Yield | {apartment.gross_yield:.2f}% |")
+            content.append(
+                f"| {LABELS['gross_yield']} | {apartment.gross_yield:.2f}% |"
+            )
         if apartment.net_yield:
-            content.append(f"| Net Yield | {apartment.net_yield:.2f}% |")
+            content.append(f"| {LABELS['net_yield']} | {apartment.net_yield:.2f}% |")
         if apartment.cash_flow_monthly is not None:
             content.append(
-                f"| Est. Cash Flow | EUR {apartment.cash_flow_monthly:,.0f}/month |"
+                f"| {LABELS['cash_flow']} | EUR {apartment.cash_flow_monthly:,.0f}/Monat |"
             )
 
         content.append("")
 
         # Property details
-        content.append("\n## Property Details\n")
+        content.append(f"\n## {HEADERS['property_details']}\n")
 
         # Specifications
-        content.append("### Specifications\n")
+        content.append("### Spezifikationen\n")
         specs_table = []
         if apartment.size_sqm:
-            specs_table.append(f"- **Size:** {apartment.size_sqm:.0f} m2")
+            specs_table.append(f"- **{LABELS['size']}:** {apartment.size_sqm:.0f} m²")
         if apartment.rooms:
-            specs_table.append(f"- **Rooms:** {apartment.rooms}")
+            specs_table.append(f"- **{LABELS['rooms']}:** {apartment.rooms}")
         if apartment.floor_text:
-            specs_table.append(f"- **Floor:** {apartment.floor_text}")
+            specs_table.append(f"- **{LABELS['floor']}:** {apartment.floor_text}")
         elif apartment.floor is not None:
             floor_text = (
-                "Ground floor" if apartment.floor == 0 else f"Floor {apartment.floor}"
+                "Erdgeschoss" if apartment.floor == 0 else f"Stock {apartment.floor}"
             )
-            specs_table.append(f"- **Floor:** {floor_text}")
+            specs_table.append(f"- **{LABELS['floor']}:** {floor_text}")
         if apartment.year_built:
-            specs_table.append(f"- **Year Built:** {apartment.year_built}")
+            specs_table.append(f"- **{LABELS['year_built']}:** {apartment.year_built}")
         if apartment.condition:
-            specs_table.append(f"- **Condition:** {apartment.condition}")
+            # Translate condition to German if in English
+            condition_de = CONDITION_TRANSLATIONS.get(
+                apartment.condition, apartment.condition
+            )
+            specs_table.append(f"- **{LABELS['condition']}:** {condition_de}")
         if apartment.building_type:
-            specs_table.append(f"- **Building Type:** {apartment.building_type}")
+            # Translate building type to German if in English
+            building_type_de = BUILDING_TYPE_TRANSLATIONS.get(
+                apartment.building_type, apartment.building_type
+            )
+            specs_table.append(f"- **{LABELS['building_type']}:** {building_type_de}")
 
         if specs_table:
             content.extend(specs_table)
@@ -377,88 +405,92 @@ class MarkdownGenerator:
         # Features
         features = []
         if apartment.elevator:
-            features.append("Elevator")
+            features.append(LABELS["elevator"])
         if apartment.balcony:
-            features.append("Balcony")
+            features.append(LABELS["balcony"])
         if apartment.terrace:
-            features.append("Terrace")
+            features.append(LABELS["terrace"])
         if apartment.loggia:
             features.append("Loggia")
         if apartment.garden:
-            features.append("Garden")
+            features.append(LABELS["garden"])
         if apartment.parking:
-            features.append(f"Parking ({apartment.parking})")
+            parking_de = PARKING_TRANSLATIONS.get(apartment.parking, apartment.parking)
+            features.append(f"{LABELS['parking']} ({parking_de})")
         if apartment.cellar:
-            features.append("Cellar")
+            features.append(LABELS["basement"])
         if apartment.storage:
-            features.append("Storage")
+            features.append("Abstellraum")
         if apartment.barrier_free:
-            features.append("Barrier-free")
+            features.append("Barrierefrei")
 
         if features:
-            content.append("### Features\n")
+            content.append(f"### {HEADERS['features']}\n")
             content.append(", ".join(features) + "\n")
 
         # Energy
         if apartment.energy_rating or apartment.hwb_value or apartment.heating_type:
-            content.append("### Energy\n")
+            content.append(f"### {HEADERS['energy']}\n")
             if apartment.energy_rating:
-                content.append(f"- **Energy Class:** {apartment.energy_rating}")
+                content.append(
+                    f"- **{LABELS['energy_class']}:** {apartment.energy_rating}"
+                )
             if apartment.hwb_value:
-                content.append(f"- **HWB:** {apartment.hwb_value} kWh/m2a")
+                content.append(f"- **{LABELS['hwb']}:** {apartment.hwb_value} kWh/m²a")
             if apartment.heating_type:
-                content.append(f"- **Heating:** {apartment.heating_type}")
+                heating_de = HEATING_TRANSLATIONS.get(
+                    apartment.heating_type, apartment.heating_type
+                )
+                content.append(f"- **{LABELS['heating']}:** {heating_de}")
             content.append("")
 
-        # Location
-        content.append("\n## Location\n")
+        # Location - New format: PLZ + City on one line, Street on next line
+        content.append(f"\n## {HEADERS['location']}\n")
+        content.append(f"**{LABELS['location']}:**\n")
 
-        # Always show city and postal code first
-        if apartment.city or apartment.postal_code:
-            location_line = []
-            if apartment.postal_code:
-                location_line.append(apartment.postal_code)
-            if apartment.city:
-                location_line.append(apartment.city)
-            content.append(f"**City:** {' '.join(location_line)}\n")
+        # First line: PLZ + City (with district for Vienna)
+        location_line = []
+        if apartment.postal_code:
+            location_line.append(apartment.postal_code)
+        if apartment.city:
+            location_line.append(apartment.city)
 
-        # District info
-        if apartment.district or apartment.district_number:
-            district_str = ""
-            if apartment.district:
-                district_str = apartment.district
-            if apartment.district_number:
-                if district_str:
-                    district_str += f" ({apartment.district_number}. Bezirk)"
-                else:
-                    district_str = f"{apartment.district_number}. Bezirk"
-            content.append(f"**District:** {district_str}\n")
+        # Add Vienna district if applicable
+        if (
+            apartment.district_number
+            and apartment.city
+            and apartment.city.lower() == "wien"
+        ):
+            location_line.append(f"Bez.{apartment.district_number}")
 
-        # Full address
-        if apartment.full_address:
-            content.append(f"**Address:** {apartment.full_address}\n")
-        elif apartment.street:
-            addr_parts = []
+        if location_line:
+            content.append(" ".join(location_line) + "  ")
+
+        # Second line: Street address
+        if apartment.street:
             street_full = apartment.street
             if apartment.house_number:
                 street_full += f" {apartment.house_number}"
             if apartment.door_number:
                 street_full += f"/{apartment.door_number}"
-            addr_parts.append(street_full)
-            content.append(f"**Address:** {', '.join(addr_parts)}\n")
+            content.append(street_full + "\n")
+        elif apartment.full_address:
+            content.append(apartment.full_address + "\n")
+        else:
+            content.append("\n")
 
         # Investment analysis
         if apartment.positive_factors or apartment.risk_factors:
-            content.append("\n## Investment Analysis\n")
+            content.append(f"\n## {HEADERS['investment_analysis']}\n")
 
             if apartment.positive_factors:
-                content.append("### Positive Factors\n")
+                content.append(f"### {HEADERS['positive_factors']}\n")
                 for factor in apartment.positive_factors:
                     content.append(f"- {factor}")
                 content.append("")
 
             if apartment.risk_factors:
-                content.append("### Risk Factors\n")
+                content.append(f"### {HEADERS['risk_factors']}\n")
                 for factor in apartment.risk_factors:
                     content.append(f"- {factor}")
                 content.append("")
@@ -468,33 +500,29 @@ class MarkdownGenerator:
             apartment.mrg_applicable is not None
             or apartment.commission_free is not None
         ):
-            content.append("\n## Regulatory Notes\n")
+            content.append(f"\n## {HEADERS['regulatory_notes']}\n")
             if apartment.mrg_applicable:
-                content.append(
-                    "- This property may be subject to MRG rent control "
-                    "(Mietrechtsgesetz) due to building age.\n"
-                )
+                content.append(f"- {PHRASES['mrg_notice']}\n")
             if apartment.commission_free:
-                content.append("- Commission-free purchase\n")
+                content.append(f"- {PHRASES['commission_free']}\n")
             elif apartment.commission_percent:
                 content.append(
-                    f"- Broker commission: {apartment.commission_percent}%\n"
+                    f"- {PHRASES['broker_commission']}: {apartment.commission_percent}%\n"
                 )
 
         # Next steps
-        content.append("\n## Next Steps\n")
-        content.append("- [ ] Schedule viewing")
-        content.append("- [ ] Request building documentation")
-        content.append("- [ ] Verify operating costs breakdown")
-        content.append("- [ ] Check rental market for comparable units")
-        content.append("- [ ] Review land registry (Grundbuch)")
+        content.append(f"\n## {HEADERS['next_steps']}\n")
+        for step in NEXT_STEPS:
+            content.append(f"- [ ] {step}")
         content.append("")
 
         # Source
         content.append("\n---\n")
-        content.append(f"Source: [{apartment.source_portal}]({apartment.source_url})")
         content.append(
-            f"  \nScraped: {apartment.scraped_at.strftime('%Y-%m-%d %H:%M')}"
+            f"{LABELS['source']}: [{apartment.source_portal}]({apartment.source_url})"
+        )
+        content.append(
+            f"  \n{LABELS['scraped']}: {apartment.scraped_at.strftime('%Y-%m-%d %H:%M')}"
         )
 
         return "\n".join(content)
@@ -527,7 +555,7 @@ class MarkdownGenerator:
 
         # Add rejection note if applicable
         if rejected and rejection_reason:
-            body = f"> **Rejected:** {rejection_reason}\n\n" + body
+            body = f"> **Abgelehnt:** {rejection_reason}\n\n" + body
 
         # Combine into full document
         full_content = f"---\n{frontmatter}---\n\n{body}"

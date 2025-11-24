@@ -13,9 +13,11 @@ from crawl4ai import AsyncWebCrawler
 from llm.analyzer import InvestmentAnalyzer
 from llm.extractor import OllamaExtractor
 from models.apartment import ApartmentListing
+from models.constants import AREA_ID_TO_LOCATION, PLZ_TO_AREA_ID
 from utils.address_parser import AustrianAddressParser
 from utils.extractors import AustrianRealEstateExtractor
 from utils.markdown_generator import MarkdownGenerator
+from utils.translations import HEADERS, LABELS, PHRASES, RECOMMENDATIONS, TABLE_HEADERS
 
 # Configure logging
 logging.basicConfig(
@@ -85,14 +87,44 @@ class EnhancedApartmentScraper:
         self.processed_apartments: List[ApartmentListing] = []
         self.apartment_files: Dict[str, str] = {}  # listing_id -> filepath
 
+        # Translate postal codes to area_ids for willhaben
+        self.area_ids = self._translate_postal_codes_to_area_ids()
+
+    def _translate_postal_codes_to_area_ids(self) -> List[int]:
+        """Translate postal codes from config to willhaben area_ids."""
+        area_ids = []
+
+        # Support both old format (area_ids) and new format (postal_codes)
+        if "postal_codes" in self.config:
+            postal_codes = self.config["postal_codes"]
+            for plz in postal_codes:
+                plz_str = str(plz)
+                if plz_str in PLZ_TO_AREA_ID:
+                    area_ids.append(PLZ_TO_AREA_ID[plz_str])
+                    logger.debug(
+                        f"Translated PLZ {plz_str} to area_id {PLZ_TO_AREA_ID[plz_str]}"
+                    )
+                else:
+                    logger.warning(
+                        f"Unknown postal code {plz_str} - no area_id mapping found"
+                    )
+        elif "area_ids" in self.config:
+            # Legacy support: use area_ids directly
+            area_ids = self.config["area_ids"]
+            logger.info("Using legacy 'area_ids' format from config")
+        else:
+            logger.warning("No 'postal_codes' or 'area_ids' found in config")
+
+        return area_ids
+
     def build_willhaben_url(self, page: int = 1) -> str:
         """Build willhaben.at search URL from configuration parameters."""
         base_url = "https://www.willhaben.at/iad/immobilien/eigentumswohnung/eigentumswohnung-angebote"
 
         params = []
 
-        # Add area IDs
-        for area_id in self.config.get("area_ids", []):
+        # Add area IDs (translated from postal codes)
+        for area_id in self.area_ids:
             params.append(f"areaId={area_id}")
 
         # Add price threshold
@@ -190,6 +222,9 @@ class EnhancedApartmentScraper:
         if not apartment.title:
             apartment.title = self._extract_title(html)
 
+        # Enrich location data from area_ids if missing
+        self._enrich_location_from_area_ids(apartment)
+
         return apartment
 
     def _extract_json_ld(self, html: str) -> Optional[Dict[str, Any]]:
@@ -286,6 +321,43 @@ class EnhancedApartmentScraper:
             apartment.state = data["state"]
         if data.get("full_address"):
             apartment.full_address = data["full_address"]
+
+    def _enrich_location_from_area_ids(self, apartment: ApartmentListing) -> None:
+        """Enrich missing location data using area_id to location mapping."""
+        # Only enrich if both postal_code and city are missing
+        if apartment.postal_code and apartment.city:
+            return
+
+        # Try to infer location from configured area_ids (translated from postal codes)
+        for area_id in self.area_ids:
+            if area_id in AREA_ID_TO_LOCATION:
+                location_info = AREA_ID_TO_LOCATION[area_id]
+
+                # Apply postal code if missing
+                if not apartment.postal_code and "postal_code" in location_info:
+                    apartment.postal_code = location_info["postal_code"]
+                    logger.debug(
+                        f"Enriched postal_code from area_id {area_id}: {apartment.postal_code}"
+                    )
+
+                # Apply city if missing
+                if not apartment.city and "city" in location_info:
+                    apartment.city = location_info["city"]
+                    logger.debug(
+                        f"Enriched city from area_id {area_id}: {apartment.city}"
+                    )
+
+                # Apply district number if applicable (Vienna)
+                if not apartment.district_number and "district_number" in location_info:
+                    apartment.district_number = location_info["district_number"]
+                    logger.debug(
+                        f"Enriched district_number from area_id {area_id}: {apartment.district_number}"
+                    )
+
+                # Once we've found and applied a location, we can stop
+                # (Using first matching area_id as fallback)
+                if apartment.postal_code and apartment.city:
+                    break
 
     def _apply_llm_data(
         self, apartment: ApartmentListing, data: Dict[str, Any]
@@ -590,7 +662,7 @@ class EnhancedApartmentScraper:
 
         # Save rejected apartments
         for apt in rejected_apartments:
-            reason = f"Ranked #{sorted_apartments.index(apt) + 1} (below top {self.summary_top_n})"
+            reason = f"Rang #{sorted_apartments.index(apt) + 1} (unterhalb Top {self.summary_top_n})"
             filepath = self.md_generator.generate_apartment_file(
                 apt, rejected=True, rejection_reason=reason
             )
@@ -611,7 +683,12 @@ class EnhancedApartmentScraper:
 
         # Generate report
         timestamp = self.run_timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        area_ids_str = ", ".join(str(aid) for aid in self.config.get("area_ids", []))
+
+        # Display postal codes if available, otherwise area_ids
+        if "postal_codes" in self.config:
+            location_str = ", ".join(str(plz) for plz in self.config["postal_codes"])
+        else:
+            location_str = ", ".join(str(aid) for aid in self.area_ids)
 
         # Calculate active/rejected counts
         total = len(self.processed_apartments)
@@ -619,61 +696,56 @@ class EnhancedApartmentScraper:
         rejected_count = max(0, total - self.summary_top_n)
 
         content = [
-            "# Investment Summary Report",
+            f"# {HEADERS['investment_summary_report']}",
             "",
-            f"**Generated:** {timestamp}",
-            f"**Run ID:** {self.run_id}",
-            f"**Portal:** {self.portal}",
-            f"**Area IDs:** {area_ids_str}",
-            f"**Max Price:** EUR {self.config.get('price_max', 'N/A'):,}",
-            f"**Total Scraped:** {total}",
-            f"**Active (Top {self.summary_top_n}):** {active_count}",
-            f"**Rejected:** {rejected_count}",
+            f"**{LABELS['generated']}:** {timestamp}",
+            f"**{LABELS['run_id']}:** {self.run_id}",
+            f"**{LABELS['portal']}:** {self.portal}",
+            f"**{LABELS['postal_codes']}:** {location_str}",
+            f"**{LABELS['max_price']}:** EUR {self.config.get('price_max', PHRASES['n/a']):,}",
+            f"**{LABELS['total_scraped']}:** {total}",
+            f"**{LABELS['active']} ({LABELS['top']} {self.summary_top_n}):** {active_count}",
+            f"**{LABELS['rejected']}:** {rejected_count}",
             "",
             "---",
             "",
-            f"## Top {active_count} Investment Opportunities",
+            f"## {LABELS['top']} {active_count} {HEADERS['top_opportunities']}",
             "",
-            "| Rank | Score | Recommendation | Price | Size | Yield | Location | Details | Source |",
+            f"| {TABLE_HEADERS['rank']} | {TABLE_HEADERS['score']} | {TABLE_HEADERS['recommendation']} | {TABLE_HEADERS['price']} | {TABLE_HEADERS['size']} | {TABLE_HEADERS['yield']} | {TABLE_HEADERS['location']} | {TABLE_HEADERS['details']} | {TABLE_HEADERS['source']} |",
             "|------|-------|----------------|-------|------|-------|----------|---------|--------|",
         ]
 
         for i, apt in enumerate(sorted_apartments[: self.summary_top_n], 1):
-            price = f"EUR {apt.price:,.0f}" if apt.price else "N/A"
-            size = f"{apt.size_sqm:.0f}m2" if apt.size_sqm else "N/A"
-            yield_str = f"{apt.gross_yield:.1f}%" if apt.gross_yield else "N/A"
-            recommendation = apt.recommendation or "N/A"
+            price = f"EUR {apt.price:,.0f}" if apt.price else PHRASES["n/a"]
+            size = f"{apt.size_sqm:.0f}m²" if apt.size_sqm else PHRASES["n/a"]
+            yield_str = f"{apt.gross_yield:.1f}%" if apt.gross_yield else PHRASES["n/a"]
 
-            # Build location string with postal code, city, district
-            location_parts = []
-            if apt.postal_code:
-                location_parts.append(apt.postal_code)
-            if apt.city:
-                location_parts.append(apt.city)
-            if apt.district_number and apt.city and apt.city.lower() == "wien":
-                location_parts.append(f"Bez.{apt.district_number}")
-            elif apt.district:
-                location_parts.append(apt.district)
-            location = " ".join(location_parts) if location_parts else "N/A"
+            # Translate recommendation to German
+            recommendation = apt.recommendation or PHRASES["n/a"]
+            if recommendation in RECOMMENDATIONS:
+                recommendation = RECOMMENDATIONS[recommendation]
+
+            # Build location string with fallback to area_id mapping
+            location = self._build_location_string(apt)
 
             # Get local file link (relative to summary report in same folder)
             local_file = self.apartment_files.get(apt.listing_id, "")
             if local_file:
                 filename = Path(local_file).name
-                details_link = f"[Details](active/{filename})"
+                details_link = f"[{LABELS['details']}](active/{filename})"
             else:
                 details_link = "-"
 
             content.append(
                 f"| {i} | {apt.investment_score:.1f} | {recommendation} | "
                 f"{price} | {size} | {yield_str} | {location} | "
-                f"{details_link} | [Source]({apt.source_url}) |"
+                f"{details_link} | [{LABELS['source']}]({apt.source_url}) |"
             )
 
         content.append("")
         content.append("---")
         content.append("")
-        content.append("*Generated by Enhanced Apartment Scraper*")
+        content.append(f"*{PHRASES['generated_by']}*")
 
         # Write report
         summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -681,6 +753,34 @@ class EnhancedApartmentScraper:
             f.write("\n".join(content))
 
         logger.info(f"Summary report saved: {summary_path}")
+
+    def _build_location_string(self, apt: ApartmentListing) -> str:
+        """Build location string with fallback to area_id mapping."""
+        location_parts = []
+
+        # Try to use extracted location data
+        if apt.postal_code:
+            location_parts.append(apt.postal_code)
+        if apt.city:
+            location_parts.append(apt.city)
+
+        # If we have no location data, try to infer from area_ids
+        if not location_parts and self.area_ids:
+            # Use first area_id as fallback
+            for area_id in self.area_ids:
+                if area_id in AREA_ID_TO_LOCATION:
+                    location_info = AREA_ID_TO_LOCATION[area_id]
+                    location_parts.append(location_info["postal_code"])
+                    location_parts.append(location_info["city"])
+                    break
+
+        # Add Vienna district if applicable
+        if apt.district_number and apt.city and apt.city.lower() == "wien":
+            location_parts.append(f"Bez.{apt.district_number}")
+        elif apt.district:
+            location_parts.append(apt.district)
+
+        return " ".join(location_parts) if location_parts else PHRASES["n/a"]
 
 
 async def load_config() -> Dict[str, Any]:
@@ -694,8 +794,11 @@ async def load_config() -> Dict[str, Any]:
         raise ValueError("Missing required field 'portal' in config.json")
 
     if config["portal"] == "willhaben":
-        if "area_ids" not in config:
-            raise ValueError("Missing required field 'area_ids' for willhaben portal")
+        # Support both postal_codes (new) and area_ids (legacy)
+        if "postal_codes" not in config and "area_ids" not in config:
+            raise ValueError(
+                "Missing required field 'postal_codes' or 'area_ids' for willhaben portal"
+            )
         if "price_max" not in config:
             raise ValueError("Missing required field 'price_max' for willhaben portal")
 

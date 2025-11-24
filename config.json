@@ -1,12 +1,21 @@
 {
   "portal": "willhaben",
-  "area_ids": [201, 202, 117223, 117224, 117225, 117226, 117227, 117228],
+  "postal_codes": [
+    "1010",
+    "1020",
+    "9020",
+    "9061",
+    "9073",
+    "9500",
+    "9504",
+    "9523"
+  ],
   "price_max": 200000,
   "output_folder": "output",
-  "max_pages": null,
+  "max_pages": 1,
 
   "extraction": {
-    "use_llm": false,
+    "use_llm": true,
     "llm_model": "qwen3:8b",
     "fallback_to_regex": false,
     "cache_extracted": false
