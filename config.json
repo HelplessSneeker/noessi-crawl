@@ -12,7 +12,7 @@
   ],
   "price_max": 200000,
   "output_folder": "output",
-  "max_pages": 1,
+  "max_pages": null,
 
   "extraction": {
     "use_llm": true,

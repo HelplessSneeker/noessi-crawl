@@ -212,11 +212,30 @@ class EnhancedApartmentScraper:
         if self.use_llm and self.llm_extractor:
             missing_critical = not apartment.price or not apartment.size_sqm
             if missing_critical or self._has_missing_fields(apartment):
-                existing_data = apartment.to_dict()
-                llm_data = await self.llm_extractor.extract_structured_data(
-                    html, existing_data
+                logger.info(
+                    f"Starting LLM extraction for listing {listing_id} "
+                    f"(missing critical: {missing_critical})"
                 )
-                self._apply_llm_data(apartment, llm_data)
+                existing_data = apartment.to_dict()
+                try:
+                    # Add hard timeout wrapper to prevent indefinite hangs
+                    llm_data = await asyncio.wait_for(
+                        self.llm_extractor.extract_structured_data(html, existing_data),
+                        timeout=180.0,  # 3 minutes max for LLM extraction
+                    )
+                    logger.info(f"LLM extraction completed for listing {listing_id}")
+                    self._apply_llm_data(apartment, llm_data)
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"LLM extraction timed out after 180s for listing {listing_id}, "
+                        f"continuing without LLM data"
+                    )
+                except Exception as e:
+                    logger.error(f"LLM extraction failed for listing {listing_id}: {e}")
+            else:
+                logger.debug(
+                    f"Skipping LLM extraction for {listing_id} - all fields present"
+                )
 
         # Extract title from markdown/HTML if not set
         if not apartment.title:
@@ -565,13 +584,17 @@ class EnhancedApartmentScraper:
 
         # Process each listing
         page_apartments = []
+        total_so_far = len(self.processed_apartments)
         for i, listing in enumerate(listings, 1):
             listing_url = listing["url"]
-            logger.info(f"  [{i}/{len(listings)}] Processing: {listing_url}")
+            logger.info(
+                f"  [{i}/{len(listings)}] Processing apartment (Total so far: {total_so_far}): {listing_url}"
+            )
 
             apartment = await self.process_apartment(crawler, listing_url)
             if apartment:
                 page_apartments.append(apartment)
+                total_so_far = len(self.processed_apartments)
 
             # Rate limiting
             await asyncio.sleep(self.delay_apartment)

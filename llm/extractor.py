@@ -72,8 +72,11 @@ class OllamaExtractor:
         Returns:
             True if Ollama is available, False otherwise
         """
+        logger.info(f"Checking Ollama availability at {self.base_url}...")
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(5.0, connect=5.0)
+            ) as client:
                 # Check if Ollama is running
                 response = await client.get(f"{self.base_url}/api/tags")
                 if response.status_code != 200:
@@ -91,6 +94,7 @@ class OllamaExtractor:
                     self._available = False
                     return False
 
+                logger.info(f"Ollama is available with model {self.model}")
                 self._available = True
                 return True
 
@@ -126,6 +130,8 @@ class OllamaExtractor:
             logger.info("Ollama not available, skipping LLM extraction")
             return existing_data or {}
 
+        logger.info(f"Starting LLM extraction using model {self.model}")
+
         # Truncate HTML to avoid token limits
         max_chars = 15000
         if len(html_content) > max_chars:
@@ -137,7 +143,10 @@ class OllamaExtractor:
         # Make request with retries
         for attempt in range(self.MAX_RETRIES):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.info(f"LLM extraction attempt {attempt + 1}/{self.MAX_RETRIES}")
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(self.timeout, connect=10.0, pool=5.0)
+                ) as client:
                     response = await client.post(
                         f"{self.base_url}/api/generate",
                         json={
@@ -157,19 +166,39 @@ class OllamaExtractor:
                         text = result.get("response", "")
                         extracted = self._parse_json_response(text)
                         if extracted:
+                            logger.info(
+                                f"LLM extraction successful on attempt {attempt + 1}"
+                            )
                             return self._validate_and_clean(extracted, existing_data)
+                        else:
+                            logger.warning(
+                                f"Failed to parse LLM response on attempt {attempt + 1}"
+                            )
 
                     logger.warning(
-                        f"Ollama request failed (attempt {attempt + 1}): "
+                        f"Ollama request failed (attempt {attempt + 1}/{self.MAX_RETRIES}): "
                         f"status={response.status_code}"
                     )
 
-            except httpx.TimeoutException:
-                logger.warning(f"Ollama timeout (attempt {attempt + 1})")
+            except httpx.TimeoutException as e:
+                logger.warning(
+                    f"Ollama timeout on attempt {attempt + 1}/{self.MAX_RETRIES} "
+                    f"(timeout: {self.timeout}s): {e}"
+                )
+            except httpx.ConnectError as e:
+                logger.warning(
+                    f"Cannot connect to Ollama on attempt {attempt + 1}/{self.MAX_RETRIES}: {e}"
+                )
             except Exception as e:
-                logger.warning(f"Ollama error (attempt {attempt + 1}): {e}")
+                logger.warning(
+                    f"Ollama error on attempt {attempt + 1}/{self.MAX_RETRIES}: {e}"
+                )
 
         # Return existing data if all retries failed
+        logger.warning(
+            f"LLM extraction failed after {self.MAX_RETRIES} attempts, "
+            f"returning existing data"
+        )
         return existing_data or {}
 
     def _build_extraction_prompt(
