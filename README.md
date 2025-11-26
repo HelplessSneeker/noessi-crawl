@@ -15,9 +15,10 @@ A Python-based web crawler for extracting apartment listings from willhaben.at (
   - Investment scoring (0-10 scale)
   - Recommendations (STRONG BUY to AVOID)
 - **Individual markdown files** per apartment with YAML frontmatter
+- **PDF investment reports** with professional styling and clickable navigation
 - **Timestamped run folders** for each scrape session
 - Top N apartments saved to `active/`, rest to `rejected/`
-- Summary report with links to apartment files
+- Summary report (markdown + PDF) with links to apartment files
 - Austrian-specific features (Vienna districts, MRG detection)
 - Rate-limited requests to be polite to the server
 
@@ -83,7 +84,9 @@ Edit `config.json` to customize your search:
     "format": "individual_markdown",
     "include_rejected": false,
     "generate_summary": true,
-    "summary_top_n": 20
+    "summary_top_n": 20,
+    "generate_pdf": true,
+    "pdf_filename": "investment_summary.pdf"
   },
 
   "rate_limiting": {
@@ -127,7 +130,9 @@ Edit `config.json` to customize your search:
 | Field | Type | Description |
 |-------|------|-------------|
 | `summary_top_n` | number | Number of top apartments in active folder (default: 20) |
-| `generate_summary` | boolean | Generate summary_report.md |
+| `generate_summary` | boolean | Generate summary reports (markdown + PDF) |
+| `generate_pdf` | boolean | Generate PDF investment report (default: true) |
+| `pdf_filename` | string | PDF filename (default: "investment_summary.pdf") |
 
 ### Finding Area IDs
 
@@ -166,7 +171,8 @@ output/
     │   └── ...
     ├── rejected/                  # All other apartments
     │   └── ...
-    └── summary_report.md          # Investment summary with links
+    ├── summary_report.md          # Markdown investment summary
+    └── investment_summary.pdf     # PDF investment report
 ```
 
 ### Individual Apartment Files
@@ -192,7 +198,7 @@ Each apartment gets its own markdown file with:
 - Next steps checklist
 - Source link
 
-### Summary Report
+### Summary Report (Markdown)
 
 The `summary_report.md` contains:
 - Run metadata (timestamp, run ID, search parameters)
@@ -203,6 +209,18 @@ The `summary_report.md` contains:
   - Location (postal code, city, district)
   - Link to details file
   - Link to source listing
+
+### Investment Report (PDF)
+
+The `investment_summary.pdf` provides a professional report with:
+- **Page 1 - Summary**: Run metadata, statistics, clickable ranking table
+- **Pages 2+ - Apartment Details** (one per page):
+  - Two-column layout (financial analysis + property details)
+  - Color-coded investment scores
+  - Positive factors and risk factors
+  - Clickable source URLs
+- **Professional styling**: Navy/gray color scheme suitable for investors
+- **Internal navigation**: Click apartment rows in summary to jump to detail pages
 
 ## Investment Scoring
 
@@ -238,7 +256,9 @@ noessi-crawl/
 ├── utils/                     # Utilities
 │   ├── extractors.py          # Regex patterns for German real estate
 │   ├── address_parser.py      # Austrian address parsing
-│   └── markdown_generator.py  # Individual file generation
+│   ├── markdown_generator.py  # Individual file generation
+│   ├── pdf_generator.py       # PDF report generation
+│   └── translations.py        # German translations
 ├── llm/                       # Optional LLM integration
 │   ├── extractor.py           # Ollama extraction
 │   └── analyzer.py            # Investment analysis
@@ -293,6 +313,7 @@ Key packages (see `pyproject.toml`):
 - `playwright >= 1.56.0` - Browser automation
 - `httpx >= 0.27.0` - Async HTTP (for Ollama)
 - `pyyaml >= 6.0` - YAML frontmatter
+- `fpdf2 >= 2.8.5` - PDF generation
 
 ## Troubleshooting
 

@@ -17,6 +17,7 @@ from models.constants import AREA_ID_TO_LOCATION, PLZ_TO_AREA_ID
 from utils.address_parser import AustrianAddressParser
 from utils.extractors import AustrianRealEstateExtractor
 from utils.markdown_generator import MarkdownGenerator
+from utils.pdf_generator import PDFGenerator
 from utils.translations import HEADERS, LABELS, PHRASES, RECOMMENDATIONS, TABLE_HEADERS
 
 # Configure logging
@@ -640,9 +641,13 @@ class EnhancedApartmentScraper:
         # Sort and save apartments - top N to active, rest to rejected
         self._save_apartments()
 
-        # Generate summary report
+        # Generate summary report (markdown and PDF)
         if self.generate_summary:
             self._generate_summary_report()
+
+            # Generate PDF if enabled
+            if self.config.get("output", {}).get("generate_pdf", True):
+                self._generate_pdf_report()
 
         return self.processed_apartments
 
@@ -766,6 +771,45 @@ class EnhancedApartmentScraper:
             f.write("\n".join(content))
 
         logger.info(f"Summary report saved: {summary_path}")
+
+    def _generate_pdf_report(self) -> None:
+        """Generate PDF report of all processed apartments."""
+        # PDF goes inside the run folder
+        pdf_filename = self.config.get("output", {}).get("pdf_filename", "investment_summary.pdf")
+        pdf_path = self.run_folder / pdf_filename
+
+        # Sort by investment score (same as markdown)
+        sorted_apartments = sorted(
+            self.processed_apartments,
+            key=lambda a: a.investment_score or 0,
+            reverse=True,
+        )
+
+        # Only include top N apartments (same as summary report)
+        top_apartments = sorted_apartments[: self.summary_top_n]
+
+        if not top_apartments:
+            logger.warning("No apartments to include in PDF report")
+            return
+
+        try:
+            # Initialize PDF generator
+            pdf_generator = PDFGenerator(
+                output_dir=str(self.run_folder),
+                run_timestamp=self.run_timestamp,
+                config=self.config
+            )
+
+            # Generate PDF
+            output_path = pdf_generator.generate_pdf_report(
+                apartments=top_apartments,
+                filename=pdf_filename
+            )
+
+            logger.info(f"PDF report saved: {output_path}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate PDF report: {e}", exc_info=True)
 
     def _build_location_string(self, apt: ApartmentListing) -> str:
         """Build simple location string: postal_code + city."""

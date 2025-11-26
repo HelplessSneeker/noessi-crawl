@@ -8,20 +8,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Multi-strategy data extraction (JSON-LD, regex, optional LLM via Ollama)
 - Investment analysis with scoring (0-10 scale) and buy recommendations
 - Individual markdown files with YAML frontmatter for each listing
+- Professional PDF reports with clickable navigation and two-column layout
 - Timestamped run folders with top N apartments in `active/`, rest in `rejected/`
 - German-language output (field labels, headers, recommendations)
-- Summary report with investment rankings and file links
+- Summary reports (markdown + PDF) with investment rankings and file links
 - Austrian-specific features (Vienna districts, MRG detection, postal code mapping)
 
 ## Development Environment
 
 - **Python Version**: 3.13 (specified in `.python-version`)
 - **Package Manager**: uv (modern Python packaging via `pyproject.toml`)
-- **Key Dependencies**: 
+- **Key Dependencies**:
   - crawl4ai >= 0.7.7 (core crawling framework)
   - playwright >= 1.56.0 (browser automation)
   - httpx >= 0.27.0 (async HTTP for Ollama)
   - pyyaml >= 6.0 (YAML frontmatter generation)
+  - fpdf2 >= 2.8.5 (PDF report generation)
 
 ## Setup Commands
 
@@ -47,7 +49,8 @@ uv run python main.py
 Output is generated in `output/apartments_YYYY-MM-DD-HHMMSS/` with:
 - `active/` - Top N apartments by investment score (default: 20)
 - `rejected/` - All other apartments with rejection reason
-- `summary_report.md` - Investment summary with links to detail files
+- `summary_report.md` - Markdown investment summary
+- `investment_summary.pdf` - PDF investment report with clickable navigation
 
 ## Project Structure
 
@@ -64,6 +67,7 @@ noessi-crawl/
 │   ├── extractors.py              # AustrianRealEstateExtractor (regex patterns)
 │   ├── address_parser.py          # AustrianAddressParser (street, PLZ, city, district)
 │   ├── markdown_generator.py      # MarkdownGenerator (individual files with YAML)
+│   ├── pdf_generator.py           # PDFGenerator (professional PDF reports)
 │   └── translations.py            # German translations (HEADERS, LABELS, RECOMMENDATIONS)
 ├── llm/                           # LLM integration (optional)
 │   ├── __init__.py
@@ -73,7 +77,8 @@ noessi-crawl/
 │   └── apartments_YYYY-MM-DD-HHMMSS/
 │       ├── active/                # Top N apartments
 │       ├── rejected/              # Rest of apartments
-│       └── summary_report.md      # Investment summary
+│       ├── summary_report.md      # Markdown summary
+│       └── investment_summary.pdf # PDF report
 ├── tests/                         # Test scripts
 │   ├── test_simple.py
 │   ├── test_single.py
@@ -159,12 +164,14 @@ Multi-strategy extraction order:
 "output": {
   "format": "individual_markdown",  // Format type (only markdown supported)
   "include_rejected": false,        // Include rejected folder
-  "generate_summary": true,         // Generate summary_report.md
-  "summary_top_n": 20              // Number of apartments in active folder
+  "generate_summary": true,         // Generate summary reports (MD + PDF)
+  "summary_top_n": 20,              // Number of apartments in active folder
+  "generate_pdf": true,             // Generate PDF report (default: true)
+  "pdf_filename": "investment_summary.pdf"  // PDF filename
 }
 ```
 
-**Key behavior**: All apartments are ranked by investment score. Top N go to `active/`, rest to `rejected/`. Summary report only includes active apartments.
+**Key behavior**: All apartments are ranked by investment score. Top N go to `active/`, rest to `rejected/`. Summary reports (markdown + PDF) only include active apartments. Both reports stay in sync.
 
 ### Rate Limiting
 
@@ -188,7 +195,7 @@ The `EnhancedApartmentScraper` class orchestrates the entire process:
 5. **Multi-strategy Extraction**: JSON-LD → Regex → LLM (if enabled)
 6. **Investment Analysis**: `InvestmentAnalyzer.analyze_apartment()` calculates metrics and score
 7. **Sorting and Saving**: `_save_apartments()` ranks by score, saves top N to active, rest to rejected
-8. **Summary Generation**: `_generate_summary_report()` creates markdown summary with rankings
+8. **Report Generation**: `_generate_summary_report()` and `_generate_pdf_report()` create synchronized reports
 
 ### Data Extraction Pipeline
 
@@ -270,6 +277,29 @@ Each apartment gets an individual file: `YYYY-MM-DD_city_district_price.md`
 10. **Source Link**: Original listing URL
 
 **German Output**: All labels, headers, and text use translations from `utils/translations.py`.
+
+### PDF Generation (utils/pdf_generator.py)
+
+The `PDFGenerator` class creates professional investment reports synchronized with markdown output:
+
+**Page 1 - Summary**:
+- Run metadata (timestamp, postal codes, filters)
+- Statistics box (total apartments, average score, average yield)
+- Investment ranking table with clickable internal links to detail pages
+- Color-coded scores (green 8+, blue 6.5-8, yellow 5-6.5, orange 3.5-5, red <3.5)
+
+**Pages 2+ - Apartment Details** (one per page):
+- **Two-column layout**: Financial analysis (left) + Property details (right)
+- Financial: Price, yield, cash flow, operating costs, recommendation
+- Property: Size, rooms, condition, features, location
+- Investment analysis: Positive factors and risk factors
+- Footer with clickable source URL
+
+**Technical Details**:
+- Uses NotoSans fonts for German character support (ä, ö, ü, ß)
+- Internal links via `add_link()` and `set_link()` for navigation
+- Professional navy/gray color scheme suitable for investors
+- Outputs to `{run_folder}/investment_summary.pdf`
 
 ### Austrian-Specific Features
 
@@ -402,10 +432,15 @@ Edit `llm/analyzer.py`, `_calculate_investment_score()` method:
 
 ### Changing Output Format
 
-Edit `utils/markdown_generator.py`:
+Edit `utils/markdown_generator.py` for markdown changes:
 - Modify `generate_apartment_file()` for structure changes
 - Update `_generate_frontmatter()` for YAML fields
 - Edit `_generate_markdown_body()` for content sections
+
+Edit `utils/pdf_generator.py` for PDF changes:
+- Modify `_draw_summary_table()` for summary page layout
+- Update `_draw_two_column_layout()` for apartment detail pages
+- Adjust colors in class constants (NAVY, GRAY, COLOR_* for scores)
 
 ### Adding New Extraction Patterns
 

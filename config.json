@@ -12,7 +12,7 @@
   ],
   "price_max": 200000,
   "output_folder": "output",
-  "max_pages": 1,
+  "max_pages": null,
 
   "extraction": {
     "use_llm": false,
@@ -52,7 +52,9 @@
     "format": "individual_markdown",
     "include_rejected": false,
     "generate_summary": true,
-    "summary_top_n": 20
+    "summary_top_n": 20,
+    "generate_pdf": true,
+    "pdf_filename": "investment_summary.pdf"
   },
 
   "rate_limiting": {
