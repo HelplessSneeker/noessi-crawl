@@ -316,9 +316,9 @@ class MarkdownGenerator:
             summary_parts.append(f"{apartment.rooms} {LABELS['rooms']}")
         if apartment.price:
             summary_parts.append(f"EUR {apartment.price:,.0f}")
-        if apartment.district:
-            summary_parts.append(f"{apartment.district}")
-        elif apartment.city:
+
+        # Location: just city (keep it simple)
+        if apartment.city:
             summary_parts.append(apartment.city)
 
         if summary_parts:
@@ -444,40 +444,33 @@ class MarkdownGenerator:
                 content.append(f"- **{LABELS['heating']}:** {heating_de}")
             content.append("")
 
-        # Location - New format: PLZ + City on one line, Street on next line
+        # Location - Simplified: just show the extracted address
         content.append(f"\n## {HEADERS['location']}\n")
-        content.append(f"**{LABELS['location']}:**\n")
+        content.append(f"**{LABELS['location']}:**  \n")
 
-        # First line: PLZ + City (with district for Vienna)
-        location_line = []
-        if apartment.postal_code:
-            location_line.append(apartment.postal_code)
-        if apartment.city:
-            location_line.append(apartment.city)
-
-        # Add Vienna district if applicable
-        if (
-            apartment.district_number
-            and apartment.city
-            and apartment.city.lower() == "wien"
-        ):
-            location_line.append(f"Bez.{apartment.district_number}")
-
-        if location_line:
-            content.append(" ".join(location_line) + "  ")
-
-        # Second line: Street address
+        # Build address from components (street address if available)
         if apartment.street:
-            street_full = apartment.street
+            street_line = apartment.street
             if apartment.house_number:
-                street_full += f" {apartment.house_number}"
+                street_line += f" {apartment.house_number}"
             if apartment.door_number:
-                street_full += f"/{apartment.door_number}"
-            content.append(street_full + "\n")
+                street_line += f"/{apartment.door_number}"
+            content.append(street_line + "  ")
+
+        # City line with postal code
+        city_parts = []
+        if apartment.postal_code:
+            city_parts.append(apartment.postal_code)
+        if apartment.city:
+            city_parts.append(apartment.city)
+
+        if city_parts:
+            content.append(" ".join(city_parts) + "\n")
         elif apartment.full_address:
+            # Fallback to full_address if we don't have structured data
             content.append(apartment.full_address + "\n")
         else:
-            content.append("\n")
+            content.append(PHRASES["n/a"] + "\n")
 
         # Investment analysis
         if apartment.positive_factors or apartment.risk_factors:

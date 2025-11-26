@@ -38,6 +38,11 @@ class AustrianAddressParser:
         r"(?P<postal>\d{4})\s+(?P<city>[A-Za-zäöüÄÖÜß\s\-]+)"
     )
 
+    # Pattern for city-only format (from URL extraction)
+    CITY_ONLY_PATTERN = re.compile(
+        r"^(?P<city>[A-Za-zäöüÄÖÜß\s\-]+?)(?:\s*,\s*(?P<state>[A-Za-zäöüÄÖÜß\s\-]+))?$"
+    )
+
     # Vienna-specific street suffixes
     STREET_SUFFIXES = [
         "straße",
@@ -107,6 +112,13 @@ class AustrianAddressParser:
             if simple_match:
                 result["postal_code"] = simple_match.group("postal")
                 result["city"] = simple_match.group("city").strip()
+            else:
+                # Try city-only pattern (e.g., "Villach, Kaernten" or just "Villach")
+                city_match = self.CITY_ONLY_PATTERN.match(address_text.strip())
+                if city_match:
+                    result["city"] = city_match.group("city").strip()
+                    if city_match.group("state"):
+                        result["state"] = city_match.group("state").strip()
 
         # Determine state and district from postal code
         if result["postal_code"]:

@@ -343,40 +343,12 @@ class EnhancedApartmentScraper:
 
     def _enrich_location_from_area_ids(self, apartment: ApartmentListing) -> None:
         """Enrich missing location data using area_id to location mapping."""
-        # Only enrich if both postal_code and city are missing
-        if apartment.postal_code and apartment.city:
-            return
-
-        # Try to infer location from configured area_ids (translated from postal codes)
-        for area_id in self.area_ids:
-            if area_id in AREA_ID_TO_LOCATION:
-                location_info = AREA_ID_TO_LOCATION[area_id]
-
-                # Apply postal code if missing
-                if not apartment.postal_code and "postal_code" in location_info:
-                    apartment.postal_code = location_info["postal_code"]
-                    logger.debug(
-                        f"Enriched postal_code from area_id {area_id}: {apartment.postal_code}"
-                    )
-
-                # Apply city if missing
-                if not apartment.city and "city" in location_info:
-                    apartment.city = location_info["city"]
-                    logger.debug(
-                        f"Enriched city from area_id {area_id}: {apartment.city}"
-                    )
-
-                # Apply district number if applicable (Vienna)
-                if not apartment.district_number and "district_number" in location_info:
-                    apartment.district_number = location_info["district_number"]
-                    logger.debug(
-                        f"Enriched district_number from area_id {area_id}: {apartment.district_number}"
-                    )
-
-                # Once we've found and applied a location, we can stop
-                # (Using first matching area_id as fallback)
-                if apartment.postal_code and apartment.city:
-                    break
+        # DISABLED: This method was causing incorrect location enrichment
+        # where apartments in Villach/Klagenfurt were being tagged as "1010 Wien"
+        # because that was in the configured postal_codes list.
+        #
+        # We now rely solely on extracted address data from the listing HTML.
+        pass
 
     def _apply_llm_data(
         self, apartment: ApartmentListing, data: Dict[str, Any]
@@ -425,15 +397,18 @@ class EnhancedApartmentScraper:
             r'"address"[:\s]*\{[^}]*"streetAddress"[:\s]*"([^"]+)"', html
         )
         if json_ld_match:
-            return json_ld_match.group(1).strip()
+            addr = json_ld_match.group(1).strip()
+            # Only return if it looks like a real address (has street name or postal code)
+            if re.search(r"\d{4}|straße|gasse|weg|platz", addr, re.IGNORECASE):
+                return addr
 
         # Strategy 2: Look for address in structured data attributes
         # willhaben often has address in data attributes or specific divs
         address_patterns = [
-            # Look for postal code + city pattern in text
-            r"(\d{4})\s+(Wien|Graz|Linz|Salzburg|Innsbruck|Klagenfurt|Villach)[^<]*",
-            # Look for street address pattern
+            # Full address with street, postal code and city
             r"([A-Za-zäöüÄÖÜß\-]+(?:straße|gasse|weg|platz|ring|allee)\s+\d+[^,<]*,\s*\d{4}\s+[A-Za-zäöüÄÖÜß\s]+)",
+            # Postal code + city pattern (more cities)
+            r"(\d{4})\s+(Wien|Graz|Linz|Salzburg|Innsbruck|Klagenfurt|Villach|St\.\s*Pölten|Wels|Dornbirn|Steyr|Wiener\s*Neustadt|Feldkirch|Bregenz)[^<]*",
             # Address label patterns
             r"(?:Adresse|Standort|Lage)[:\s]*</[^>]+>\s*<[^>]+>([^<]+)",
             r"(?:Adresse|Standort|Lage)[:\s]*([^<\n]{10,80})",
@@ -456,17 +431,32 @@ class EnhancedApartmentScraper:
         # Strategy 3: Extract from URL
         # Pattern: /wien-1030-landstrasse/ or /kaernten/klagenfurt/
         url_patterns = [
+            # Vienna with postal code: /wien-1030-landstrasse/
             (
                 r"/wien-(\d{4})-([^/]+)",
-                lambda m: f"{m.group(1)} Wien, {m.group(2).replace('-', ' ').title()}",
+                lambda m: f"{m.group(1)} Wien",
             ),
+            # Other cities with postal code: /1030-landstrasse/
             (
                 r"/(\d{4})-([^/]+)",
-                lambda m: f"{m.group(1)} {m.group(2).replace('-', ' ').title()}",
+                lambda m: f"{m.group(1)}",
+            ),
+            # State/City format: /kaernten/villach/ or /wien/leopoldstadt/
+            (
+                r"/(?:kaernten|kärnten)/([a-z\-]+)/",
+                lambda m: f"{m.group(1).replace('-', ' ').title()}, Kärnten",
             ),
             (
-                r"/([a-z]+)/([a-z\-]+)/",
-                lambda m: f"{m.group(2).replace('-', ' ').title()}, {m.group(1).title()}",
+                r"/(?:steiermark)/([a-z\-]+)/",
+                lambda m: f"{m.group(1).replace('-', ' ').title()}, Steiermark",
+            ),
+            (
+                r"/(?:tirol)/([a-z\-]+)/",
+                lambda m: f"{m.group(1).replace('-', ' ').title()}, Tirol",
+            ),
+            (
+                r"/wien/([a-z\-]+)/",
+                lambda m: "Wien",
             ),
         ]
 
@@ -778,30 +768,14 @@ class EnhancedApartmentScraper:
         logger.info(f"Summary report saved: {summary_path}")
 
     def _build_location_string(self, apt: ApartmentListing) -> str:
-        """Build location string with fallback to area_id mapping."""
+        """Build simple location string: postal_code + city."""
         location_parts = []
 
-        # Try to use extracted location data
+        # Simple format: postal code + city
         if apt.postal_code:
             location_parts.append(apt.postal_code)
         if apt.city:
             location_parts.append(apt.city)
-
-        # If we have no location data, try to infer from area_ids
-        if not location_parts and self.area_ids:
-            # Use first area_id as fallback
-            for area_id in self.area_ids:
-                if area_id in AREA_ID_TO_LOCATION:
-                    location_info = AREA_ID_TO_LOCATION[area_id]
-                    location_parts.append(location_info["postal_code"])
-                    location_parts.append(location_info["city"])
-                    break
-
-        # Add Vienna district if applicable
-        if apt.district_number and apt.city and apt.city.lower() == "wien":
-            location_parts.append(f"Bez.{apt.district_number}")
-        elif apt.district:
-            location_parts.append(apt.district)
 
         return " ".join(location_parts) if location_parts else PHRASES["n/a"]
 

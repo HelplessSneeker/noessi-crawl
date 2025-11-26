@@ -12,10 +12,10 @@
   ],
   "price_max": 200000,
   "output_folder": "output",
-  "max_pages": null,
+  "max_pages": 1,
 
   "extraction": {
-    "use_llm": true,
+    "use_llm": false,
     "llm_model": "qwen3:8b",
     "fallback_to_regex": false,
     "cache_extracted": false
