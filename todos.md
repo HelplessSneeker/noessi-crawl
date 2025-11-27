@@ -4,8 +4,8 @@ this file cmoposes todos i define and notes for edits i want to make in the futu
 
 ## Notes
 
-Adress line in detail is working somwhat the first line is wrong but the seccond works
-summarry adresses are not working needs fixing
+betriebskosten need improvement
+Adress is still missing sometimes
 
 ## Todos
 
