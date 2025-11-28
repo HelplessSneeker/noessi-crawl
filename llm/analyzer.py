@@ -186,7 +186,11 @@ class InvestmentAnalyzer:
                     )
 
         # === Operating costs (up to +0.5) ===
-        if apartment.betriebskosten_per_sqm:
+        if apartment.betriebskosten_monthly is None or apartment.betriebskosten_per_sqm is None:
+            # Missing critical financial data
+            score -= 0.5
+            risk_factors.append("Betriebskosten nicht verfügbar - manuelle Prüfung erforderlich")
+        elif apartment.betriebskosten_per_sqm:
             if apartment.betriebskosten_per_sqm < 2.0:
                 score += 0.5
                 positive_factors.append("Niedrige Betriebskosten")

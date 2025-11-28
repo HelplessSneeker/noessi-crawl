@@ -132,10 +132,11 @@ class OllamaExtractor:
 
         logger.info(f"Starting LLM extraction using model {self.model}")
 
-        # Truncate HTML to avoid token limits
-        max_chars = 15000
+        # Truncate HTML to avoid token limits (increased from 15k to 20k for better coverage)
+        max_chars = 20000
         if len(html_content) > max_chars:
             html_content = html_content[:max_chars] + "\n... [truncated]"
+            logger.debug(f"HTML truncated from {len(html_content)} to {max_chars} chars")
 
         # Build prompt
         prompt = self._build_extraction_prompt(html_content, existing_data)
@@ -216,34 +217,66 @@ Already extracted data (verify and supplement):
 
         return f"""You are an expert at extracting real estate data from Austrian apartment listings.
 
-Extract the following information from this willhaben.at apartment listing HTML.
+Extract information from this willhaben.at apartment listing HTML.
 Return ONLY valid JSON with the extracted fields. Use null for missing values.
 {existing_str}
-Fields to extract:
+GERMAN TERMINOLOGY GUIDE (look for these terms in the HTML):
+- Betriebskosten, BK, Monatl. Kosten = betriebskosten_monthly
+- Reparaturrücklage, Reparaturfonds, Instandhaltungsrücklage = reparaturrucklage
+- Zimmer, Zi., Räume = rooms
+- Schlafzimmer, Schlafräume = bedrooms
+- Badezimmer, Bad, WC = bathrooms
+- Aufzug, Lift, Personenaufzug = elevator
+- Stock, Stockwerk, Etage, OG (Obergeschoss), EG (Erdgeschoss) = floor
+- Balkon = balcony
+- Terrasse = terrace
+- Garten, Gartenbenützung = garden
+- Parkplatz, Tiefgarage, Garage, Stellplatz, Carport = parking
+- Keller, Kellerabteil, Abstellraum = cellar
+- Baujahr, Errichtungsjahr = year_built
+- HWB, Heizwärmebedarf = hwb_value
+- Erstbezug, Saniert, Neuwertig, Gut, Sehr gut, Renovierungsbedürftig = condition
+- Altbau, Neubau, Gründerzeit = building_type
+
+PRIORITY FIELDS TO EXTRACT (in order of importance):
+
+**CRITICAL FINANCIAL FIELDS** (highest priority - look in tables, specifications, cost breakdowns):
+- betriebskosten_monthly: Monthly operating costs in EUR (number). Look for "Betriebskosten", "Nebenkosten", "BK", "NK", "monatliche Kosten"
+  IMPORTANT: Typical range is €50-500/month. Values under €20 are likely placeholders or errors - mark as null if found.
+- reparaturrucklage: Monthly repair fund contribution in EUR (number). Look for "Reparaturrücklage", "Instandhaltungsrücklage"
+  IMPORTANT: Typical range is €10-200/month. Very low values (< €5) are likely errors - mark as null.
+- price: Purchase price in EUR (number, no currency symbol). Usually prominent, labeled "Preis", "Kaufpreis"
+
+**PROPERTY FEATURES** (second priority):
+- bedrooms: Number of bedrooms (integer). Look for "Schlafzimmer", may be in room breakdown
+- bathrooms: Number of bathrooms (integer). Look for "Badezimmer", "Bad", "WC"
+- elevator: Has elevator (boolean). Look for "Aufzug", "Lift"
+- balcony: Has balcony (boolean). Look for "Balkon" in features or description
+- terrace: Has terrace (boolean). Look for "Terrasse"
+- garden: Has garden access (boolean). Look for "Garten", "Gartenbenützung"
+- parking: Parking type (one of: tiefgarage, garage, stellplatz, carport, null). Look for "Parkplatz", "Tiefgarage", "Garage"
+- cellar: Has cellar storage (boolean). Look for "Keller", "Kellerabteil"
+- commission_free: Is commission-free (boolean). Look for "Provisionsfrei", "keine Provision"
+
+**ADDRESS & OTHER FIELDS**:
+- address: Full address string. Look for "Adresse", street name with postal code
 - title: Listing title (string)
-- price: Purchase price in EUR (number, no currency symbol)
-- size_sqm: Living area in square meters (number)
-- rooms: Number of rooms (number, can be decimal like 2.5)
-- bedrooms: Number of bedrooms (integer)
-- bathrooms: Number of bathrooms (integer)
-- floor: Floor number (integer, 0 for ground floor)
-- year_built: Year the building was constructed (integer)
+- size_sqm: Living area in square meters (number). Look for "Wohnfläche", "m²", "Quadratmeter"
+- rooms: Number of rooms (number, can be decimal like 2.5). Look for "Zimmer", "Zi."
+- floor: Floor number (integer, 0 for ground floor). Look for "Stock", "Etage", "EG" (0), "1. OG" (1)
+- year_built: Year constructed (integer). Look for "Baujahr"
 - condition: Property condition (one of: erstbezug, saniert, renovierungsbedurftig, gut, sehr_gut, neuwertig)
 - building_type: Building type (one of: altbau, neubau, grunderzeit)
-- energy_rating: Energy efficiency class (A++ to G)
-- hwb_value: HWB energy value in kWh/m2a (number)
+- energy_rating: Energy class (A++ to G). Look for "Energieausweis", "HWB-Klasse"
+- hwb_value: HWB energy value in kWh/m²a (number). Look for "HWB", "Heizwärmebedarf"
 - heating_type: Heating type (one of: fernwarme, gas, zentralheizung, fussbodenheizung, elektro, warmepumpe)
-- betriebskosten_monthly: Monthly operating costs in EUR (number)
-- reparaturrucklage: Repair fund contribution in EUR (number)
-- elevator: Has elevator (boolean)
-- balcony: Has balcony (boolean)
-- terrace: Has terrace (boolean)
-- garden: Has garden access (boolean)
-- parking: Parking type if available (one of: tiefgarage, garage, stellplatz, carport, null)
-- cellar: Has cellar storage (boolean)
-- commission_free: Is commission-free (boolean)
-- address: Full address string
 - description_summary: Brief 1-2 sentence summary of key selling points
+
+WHERE TO FIND DATA:
+- Financial data: Usually in tables with headers "Kosten", "Betriebskosten", specifications section
+- Features: Look in feature lists (often bullet points), amenities section, property details table
+- Numeric values: Often in structured tables with labels and values in adjacent cells
+- Boolean features: If mentioned anywhere in listing = true, otherwise = null
 
 HTML content:
 {html_content}
@@ -287,6 +320,9 @@ Return only the JSON object, no explanation:"""
     ) -> Dict[str, Any]:
         """Validate and clean extracted data, merging with existing."""
         result = dict(existing) if existing else {}
+        validated_count = 0
+        rejected_count = 0
+        rejected_fields = []
 
         # Type validation and cleaning
         type_validators = {
@@ -298,8 +334,8 @@ Return only the JSON object, no explanation:"""
             "floor": (int, lambda x: -2 <= x < 100),
             "year_built": (int, lambda x: 1800 <= x <= 2030),
             "hwb_value": (float, lambda x: 0 < x < 500),
-            "betriebskosten_monthly": (float, lambda x: 0 < x < 2000),
-            "reparaturrucklage": (float, lambda x: 0 < x < 500),
+            "betriebskosten_monthly": (float, lambda x: 20 <= x < 2000),  # FIXED: Min €20/month (was: 0 < x)
+            "reparaturrucklage": (float, lambda x: 5 <= x < 500),  # FIXED: Min €5/month (was: 0 < x)
         }
 
         boolean_fields = [
@@ -329,16 +365,39 @@ Return only the JSON object, no explanation:"""
                     value = expected_type(extracted[field])
                     if validator(value):
                         result[field] = value
-                except (ValueError, TypeError):
-                    pass
+                        validated_count += 1
+                        logger.debug(f"Validated {field}={value}")
+                    else:
+                        rejected_count += 1
+                        # Enhanced logging with specific reasons
+                        reason = "out of range"
+                        if field == "betriebskosten_monthly" and value < 20:
+                            reason = f"too low (€{value} < €20 minimum, likely placeholder)"
+                        elif field == "reparaturrucklage" and value < 5:
+                            reason = f"too low (€{value} < €5 minimum, likely placeholder)"
+                        rejected_fields.append(f"{field}={extracted[field]} ({reason})")
+                        logger.warning(f"Rejected {field}={extracted[field]} ({reason})")
+                except (ValueError, TypeError) as e:
+                    rejected_count += 1
+                    rejected_fields.append(f"{field}={extracted[field]} (type error)")
+                    logger.debug(f"Rejected {field}={extracted[field]} (type error: {e})")
 
         # Process boolean fields
         for field in boolean_fields:
             if field in extracted and extracted[field] is not None:
                 if isinstance(extracted[field], bool):
                     result[field] = extracted[field]
+                    validated_count += 1
+                    logger.debug(f"Validated {field}={extracted[field]}")
                 elif isinstance(extracted[field], str):
-                    result[field] = extracted[field].lower() in ("true", "yes", "ja")
+                    parsed_value = extracted[field].lower() in ("true", "yes", "ja", "1")
+                    result[field] = parsed_value
+                    validated_count += 1
+                    logger.debug(f"Validated {field}={parsed_value} (parsed from '{extracted[field]}')")
+                else:
+                    rejected_count += 1
+                    rejected_fields.append(f"{field}={extracted[field]} (invalid boolean)")
+                    logger.debug(f"Rejected {field}={extracted[field]} (invalid boolean type)")
 
         # Process string fields
         for field in string_fields:
@@ -347,5 +406,25 @@ Return only the JSON object, no explanation:"""
                     value = extracted[field].strip()
                     if value and value.lower() not in ("null", "none", "n/a"):
                         result[field] = value
+                        validated_count += 1
+                        logger.debug(f"Validated {field}='{value[:50]}...'")
+                    else:
+                        rejected_count += 1
+                        rejected_fields.append(f"{field}='{value}' (null-like)")
+                        logger.debug(f"Rejected {field}='{value}' (null-like value)")
+                else:
+                    rejected_count += 1
+                    rejected_fields.append(f"{field} (not a string)")
+                    logger.debug(f"Rejected {field} (not a string)")
+
+        # Summary logging
+        total_fields = validated_count + rejected_count
+        if total_fields > 0:
+            logger.info(
+                f"Validation complete: {validated_count} validated, {rejected_count} rejected "
+                f"({validated_count*100//total_fields}% success rate)"
+            )
+            if rejected_fields:
+                logger.debug(f"Rejected fields: {', '.join(rejected_fields[:5])}")
 
         return result

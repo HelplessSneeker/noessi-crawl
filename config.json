@@ -17,8 +17,10 @@
   "extraction": {
     "use_llm": false,
     "llm_model": "qwen3:8b",
-    "fallback_to_regex": false,
-    "cache_extracted": false
+    "fallback_to_regex": true,
+    "cache_extracted": false,
+    "diagnostic_mode": false,
+    "diagnostic_output": "diagnostics"
   },
 
   "filters": {

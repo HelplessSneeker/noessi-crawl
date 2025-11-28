@@ -199,9 +199,15 @@ class EnhancedApartmentScraper:
             apartment.raw_json_ld = json_ld_data
             self._apply_json_ld_data(apartment, json_ld_data)
 
-        # Strategy 2: Extract using regex patterns
+        # Strategy 1.5: DOM-based extraction (more reliable for separated labels/values)
+        dom_data = self.extractor.extract_from_html_dom(html)
+        if dom_data:
+            self._apply_regex_data(apartment, dom_data)  # Reuse same apply logic
+            logger.debug(f"DOM extraction found {len(dom_data)} fields")
+
+        # Strategy 2: Extract using regex patterns (more authoritative for betriebskosten)
         regex_data = self.extractor.extract_from_html(html)
-        self._apply_regex_data(apartment, regex_data)
+        self._apply_regex_data(apartment, regex_data, allow_betriebskosten_overwrite=True)
 
         # Extract address
         address_text = self._extract_address_from_html(html, url)
@@ -213,9 +219,14 @@ class EnhancedApartmentScraper:
         if self.use_llm and self.llm_extractor:
             missing_critical = not apartment.price or not apartment.size_sqm
             if missing_critical or self._has_missing_fields(apartment):
+                # Count non-None fields before LLM extraction
+                import time
+                fields_before = sum(1 for k, v in apartment.to_dict().items() if v not in (None, ""))
+                start_time = time.time()
+
                 logger.info(
                     f"Starting LLM extraction for listing {listing_id} "
-                    f"(missing critical: {missing_critical})"
+                    f"(missing critical: {missing_critical}, fields before: {fields_before})"
                 )
                 existing_data = apartment.to_dict()
                 try:
@@ -226,6 +237,23 @@ class EnhancedApartmentScraper:
                     )
                     logger.info(f"LLM extraction completed for listing {listing_id}")
                     self._apply_llm_data(apartment, llm_data)
+
+                    # Count non-None fields after LLM extraction
+                    fields_after = sum(1 for k, v in apartment.to_dict().items() if v not in (None, ""))
+                    elapsed_time = time.time() - start_time
+                    fields_added = fields_after - fields_before
+
+                    if fields_added > 0:
+                        logger.info(
+                            f"LLM extraction added {fields_added} fields "
+                            f"(before: {fields_before} → after: {fields_after}) "
+                            f"in {elapsed_time:.1f}s"
+                        )
+                    else:
+                        logger.warning(
+                            f"LLM extraction completed but added 0 new fields in {elapsed_time:.1f}s"
+                        )
+
                 except asyncio.TimeoutError:
                     logger.error(
                         f"LLM extraction timed out after 180s for listing {listing_id}, "
@@ -244,6 +272,18 @@ class EnhancedApartmentScraper:
 
         # Enrich location data from area_ids if missing
         self._enrich_location_from_area_ids(apartment)
+
+        # Diagnostic mode: save extraction data for debugging
+        if self.config.get("extraction", {}).get("diagnostic_mode", False):
+            self._save_diagnostic_data(
+                listing_id=listing_id,
+                url=url,
+                html=html,
+                json_ld_data=json_ld_data,
+                regex_data=regex_data,
+                llm_data=llm_data if self.use_llm else None,
+                apartment=apartment
+            )
 
         return apartment
 
@@ -280,7 +320,7 @@ class EnhancedApartmentScraper:
                     pass
 
     def _apply_regex_data(
-        self, apartment: ApartmentListing, data: Dict[str, Any]
+        self, apartment: ApartmentListing, data: Dict[str, Any], allow_betriebskosten_overwrite: bool = False
     ) -> None:
         """Apply regex-extracted data to apartment."""
         # Only apply if not already set
@@ -291,9 +331,20 @@ class EnhancedApartmentScraper:
         if not apartment.rooms and "rooms" in data:
             apartment.rooms = data["rooms"]
 
+        # Special handling for betriebskosten: allow regex to overwrite DOM extraction
+        if allow_betriebskosten_overwrite and "betriebskosten_monthly" in data:
+            new_value = data["betriebskosten_monthly"]
+            current_value = apartment.betriebskosten_monthly
+            if current_value and current_value != new_value:
+                logger.info(
+                    f"Regex overwriting betriebskosten: €{current_value} → €{new_value} "
+                    f"(regex patterns are more authoritative)"
+                )
+            apartment.betriebskosten_monthly = new_value
+
         # Apply other fields
         field_mappings = [
-            "betriebskosten_monthly",
+            "betriebskosten_monthly",  # Will be skipped if already applied above
             "reparaturrucklage",
             "floor",
             "floor_text",
@@ -381,6 +432,101 @@ class EnhancedApartmentScraper:
         if not apartment.heating_type and data.get("heating_type"):
             apartment.heating_type = data["heating_type"]
 
+        # Financial fields (CRITICAL for investment analysis)
+        # Allow LLM to overwrite suspicious values (e.g., betriebskosten < €10 is likely wrong)
+        fields_added = []
+
+        # Betriebskosten: Apply if empty OR if existing value is suspiciously low
+        if data.get("betriebskosten_monthly"):
+            llm_value = data["betriebskosten_monthly"]
+            current_value = apartment.betriebskosten_monthly
+
+            # Smarter overwrite conditions
+            should_overwrite = (
+                not current_value or  # Empty
+                current_value < 20 or  # Too low (placeholder) - increased from 10
+                (llm_value > 20 and llm_value > current_value * 5)  # LLM found much higher realistic value
+            )
+
+            if should_overwrite:
+                if current_value and current_value != llm_value:
+                    fields_added.append(
+                        f"betriebskosten_monthly=€{llm_value} (replaced suspicious €{current_value})"
+                    )
+                    logger.info(
+                        f"Replaced betriebskosten_monthly: €{current_value} → €{llm_value} "
+                        f"(reason: {'empty' if not current_value else 'too low' if current_value < 20 else 'much higher value found'})"
+                    )
+                else:
+                    fields_added.append(f"betriebskosten_monthly=€{llm_value}")
+                apartment.betriebskosten_monthly = llm_value
+            else:
+                logger.debug(
+                    f"Kept existing betriebskosten_monthly=€{current_value} "
+                    f"(LLM suggested €{llm_value}, but current value seems reasonable)"
+                )
+
+        # Reparaturrücklage: Apply if empty OR if existing value is suspiciously low
+        if data.get("reparaturrucklage"):
+            llm_value = data["reparaturrucklage"]
+            current_value = apartment.reparaturrucklage
+
+            # Smarter overwrite conditions
+            should_overwrite = (
+                not current_value or  # Empty
+                current_value < 5 or  # Too low
+                (llm_value > 5 and llm_value > current_value * 3)  # Much higher realistic value
+            )
+
+            if should_overwrite:
+                if current_value and current_value != llm_value:
+                    fields_added.append(
+                        f"reparaturrucklage=€{llm_value} (replaced suspicious €{current_value})"
+                    )
+                    logger.info(
+                        f"Replaced reparaturrucklage: €{current_value} → €{llm_value}"
+                    )
+                else:
+                    fields_added.append(f"reparaturrucklage=€{llm_value}")
+                apartment.reparaturrucklage = llm_value
+            else:
+                logger.debug(
+                    f"Kept existing reparaturrucklage=€{current_value} "
+                    f"(LLM suggested €{llm_value}, but current value seems reasonable)"
+                )
+
+        # HWB value: Apply if empty (no suspicious value check needed)
+        if not apartment.hwb_value and data.get("hwb_value"):
+            apartment.hwb_value = data["hwb_value"]
+            fields_added.append(f"hwb_value={data['hwb_value']}")
+
+        # Boolean features
+        if apartment.elevator is None and data.get("elevator") is not None:
+            apartment.elevator = data["elevator"]
+            fields_added.append(f"elevator={data['elevator']}")
+        if apartment.balcony is None and data.get("balcony") is not None:
+            apartment.balcony = data["balcony"]
+            fields_added.append(f"balcony={data['balcony']}")
+        if apartment.terrace is None and data.get("terrace") is not None:
+            apartment.terrace = data["terrace"]
+            fields_added.append(f"terrace={data['terrace']}")
+        if apartment.garden is None and data.get("garden") is not None:
+            apartment.garden = data["garden"]
+            fields_added.append(f"garden={data['garden']}")
+        if apartment.parking is None and data.get("parking") is not None:
+            apartment.parking = data["parking"]
+            fields_added.append(f"parking={data['parking']}")
+        if apartment.cellar is None and data.get("cellar") is not None:
+            apartment.cellar = data["cellar"]
+            fields_added.append(f"cellar={data['cellar']}")
+        if apartment.commission_free is None and data.get("commission_free") is not None:
+            apartment.commission_free = data["commission_free"]
+            fields_added.append(f"commission_free={data['commission_free']}")
+
+        # Log fields filled by LLM
+        if fields_added:
+            logger.info(f"LLM filled {len(fields_added)} fields: {', '.join(fields_added)}")
+
         # Address from LLM
         if data.get("address") and not apartment.full_address:
             parsed = self.address_parser.parse_address(data["address"])
@@ -388,8 +534,68 @@ class EnhancedApartmentScraper:
 
     def _has_missing_fields(self, apartment: ApartmentListing) -> bool:
         """Check if apartment has important missing fields."""
-        important_fields = ["rooms", "year_built", "condition", "energy_rating"]
-        return any(getattr(apartment, f) is None for f in important_fields)
+        # Categorized by user priority: Financial > Features > Address
+
+        # Financial fields (HIGHEST PRIORITY)
+        financial_fields = [
+            "betriebskosten_monthly",
+            "reparaturrucklage",
+            "heating_cost_monthly",
+            "price_per_sqm",
+        ]
+
+        # Property features
+        feature_fields = [
+            "bedrooms",
+            "bathrooms",
+            "elevator",
+            "balcony",
+            "terrace",
+            "garden",
+            "parking",
+            "cellar",
+            "commission_free",
+        ]
+
+        # Address details
+        address_fields = [
+            "postal_code",
+            "city",
+            "street",
+            "house_number",
+            "district",
+        ]
+
+        # Other important fields
+        other_fields = [
+            "rooms",
+            "year_built",
+            "condition",
+            "energy_rating",
+            "hwb_value",
+        ]
+
+        # Check each category and log which triggered LLM
+        missing_financial = [f for f in financial_fields if getattr(apartment, f) is None]
+        missing_features = [f for f in feature_fields if getattr(apartment, f) is None]
+        missing_address = [f for f in address_fields if getattr(apartment, f) is None]
+        missing_other = [f for f in other_fields if getattr(apartment, f) is None]
+
+        has_missing = bool(missing_financial or missing_features or missing_address or missing_other)
+
+        if has_missing:
+            categories = []
+            if missing_financial:
+                categories.append(f"financial({len(missing_financial)})")
+            if missing_features:
+                categories.append(f"features({len(missing_features)})")
+            if missing_address:
+                categories.append(f"address({len(missing_address)})")
+            if missing_other:
+                categories.append(f"other({len(missing_other)})")
+            logger.info(f"LLM extraction triggered - missing: {', '.join(categories)}")
+
+        return has_missing
 
     def _extract_address_from_html(self, html: str, url: str) -> Optional[str]:
         """Extract address from HTML or URL."""
@@ -822,6 +1028,44 @@ class EnhancedApartmentScraper:
             location_parts.append(apt.city)
 
         return " ".join(location_parts) if location_parts else PHRASES["n/a"]
+
+    def _save_diagnostic_data(
+        self,
+        listing_id: str,
+        url: str,
+        html: str,
+        json_ld_data: Optional[Dict[str, Any]],
+        regex_data: Dict[str, Any],
+        llm_data: Optional[Dict[str, Any]],
+        apartment: ApartmentListing
+    ) -> None:
+        """Save diagnostic extraction data for debugging."""
+        diagnostic_dir = Path(self.config.get("extraction", {}).get("diagnostic_output", "diagnostics"))
+        diagnostic_dir.mkdir(exist_ok=True)
+
+        diagnostic_file = diagnostic_dir / f"{listing_id}_extraction.json"
+
+        diagnostic_data = {
+            "listing_id": listing_id,
+            "url": url,
+            "timestamp": datetime.now().isoformat(),
+            "extraction_results": {
+                "json_ld": json_ld_data,
+                "regex": regex_data,
+                "llm": llm_data,
+            },
+            "final_apartment": apartment.to_dict(),
+            "html_excerpt": html[:5000] if html else None,  # First 5000 chars for inspection
+            "html_length": len(html) if html else 0,
+        }
+
+        try:
+            with open(diagnostic_file, "w", encoding="utf-8") as f:
+                json.dump(diagnostic_data, f, indent=2, ensure_ascii=False, default=str)
+
+            logger.debug(f"Saved diagnostic data to {diagnostic_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save diagnostic data: {e}")
 
 
 async def load_config() -> Dict[str, Any]:

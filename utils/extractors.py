@@ -1,9 +1,12 @@
 """Austrian real estate extraction patterns and utilities."""
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Pattern
 
 from models.constants import VIENNA_DISTRICTS
+
+logger = logging.getLogger(__name__)
 
 
 class AustrianRealEstateExtractor:
@@ -33,11 +36,23 @@ class AustrianRealEstateExtractor:
         re.compile(r"Kaufpreis[:\s]*([\d.,]+)", re.IGNORECASE),
     ]
 
-    # Operating costs (Betriebskosten)
+    # Operating costs (Betriebskosten / Nebenkosten)
+    # Note: willhaben.at uses "Nebenkosten" instead of "Betriebskosten"
     BETRIEBSKOSTEN_PATTERNS: List[Pattern] = [
+        # Inline patterns (label adjacent to value)
         re.compile(r"Betriebskosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
+        re.compile(r"Nebenkosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),  # NEW: willhaben.at term
         re.compile(r"BK[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"monatl\.?\s*Betriebskosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
+        re.compile(r"NK[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),  # NEW: Nebenkosten abbreviation
+        re.compile(r"monatl\.?\s*(?:Betriebs|Neben)kosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
+
+        # Separated DOM patterns (label and value in different elements)
+        re.compile(r"(?:Betriebs|Neben)kosten.*?€\s*([\d.,]+)", re.IGNORECASE | re.DOTALL),
+        re.compile(r"(?:BK|NK).*?€\s*([\d.,]+)", re.IGNORECASE | re.DOTALL),
+
+        # Table cell patterns (common in real estate listings)
+        re.compile(r"<td[^>]*>(?:Betriebs|Neben)kosten</td>\s*<td[^>]*>€?\s*([\d.,]+)", re.IGNORECASE),
+        re.compile(r">(?:Betriebs|Neben)kosten<.*?>€\s*([\d.,]+)<", re.IGNORECASE | re.DOTALL),
     ]
 
     # Reparaturrücklage (repair fund)
@@ -159,13 +174,43 @@ class AustrianRealEstateExtractor:
         pass
 
     def extract_field(
-        self, text: str, patterns: List[Pattern], group: int = 1
+        self,
+        text: str,
+        patterns: List[Pattern],
+        group: int = 1,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
     ) -> Optional[str]:
-        """Extract first matching value from text using patterns."""
+        """
+        Extract first matching value from text using patterns.
+
+        Args:
+            text: HTML text to search
+            patterns: List of regex patterns to try
+            group: Regex group number to extract (default: 1)
+            min_value: Minimum acceptable numeric value (filters out placeholders)
+            max_value: Maximum acceptable numeric value (sanity check)
+
+        Returns:
+            Matched string value, or None if no valid match found
+        """
         for pattern in patterns:
             match = pattern.search(text)
             if match:
-                return match.group(group)
+                value_str = match.group(group)
+
+                # If validation requested, check numeric bounds
+                if min_value is not None or max_value is not None:
+                    parsed = self.parse_number(value_str)
+                    if parsed is not None:
+                        if min_value is not None and parsed < min_value:
+                            # Skip this match - too low (likely placeholder)
+                            continue
+                        if max_value is not None and parsed > max_value:
+                            # Skip this match - too high (likely error)
+                            continue
+
+                return value_str
         return None
 
     def extract_boolean(self, text: str, pattern: Pattern) -> bool:
@@ -233,6 +278,56 @@ class AustrianRealEstateExtractor:
 
         return result
 
+    def extract_from_html_dom(self, html: str) -> Dict[str, Any]:
+        """
+        Extract fields using HTML DOM parsing (more reliable for separated labels/values).
+
+        Falls back gracefully if BeautifulSoup is not available.
+        """
+        try:
+            from bs4 import BeautifulSoup
+        except ImportError:
+            logger.warning("BeautifulSoup not installed, skipping DOM extraction")
+            return {}
+
+        try:
+            soup = BeautifulSoup(html, 'html.parser')
+            extracted: Dict[str, Any] = {}
+
+            # Find betriebskosten/nebenkosten in table rows or definition lists
+            # Pattern 1: Table rows with label/value cells
+            for row in soup.find_all(['tr', 'div', 'dl']):
+                cells = row.find_all(['td', 'div', 'span', 'dd', 'dt'])
+                if len(cells) >= 2:
+                    # Check each pair of cells
+                    for i in range(len(cells) - 1):
+                        label_text = cells[i].get_text(strip=True).lower()
+                        value_text = cells[i + 1].get_text(strip=True)
+
+                        # Look for betriebskosten/nebenkosten keywords
+                        if any(keyword in label_text for keyword in ['betriebskosten', 'nebenkosten', 'bk', 'nk']):
+                            # Extract numeric value
+                            value_match = re.search(r'([\d.,]+)', value_text)
+                            if value_match:
+                                bk_value = self.parse_number(value_match.group(1))
+                                # Validate range (reject placeholders)
+                                if bk_value and 20 <= bk_value < 2000:
+                                    extracted["betriebskosten_monthly"] = bk_value
+                                    logger.debug(f"DOM extracted betriebskosten: €{bk_value} from '{label_text}' / '{value_text}'")
+                                    break
+
+                if "betriebskosten_monthly" in extracted:
+                    break
+
+            # Pattern 2: Look for specific willhaben.at structure
+            # (Can be extended based on actual HTML structure)
+
+            return extracted
+
+        except Exception as e:
+            logger.debug(f"DOM extraction failed: {e}")
+            return {}
+
     def extract_from_html(self, html: str) -> Dict[str, Any]:
         """
         Extract all available fields from HTML content.
@@ -256,8 +351,14 @@ class AustrianRealEstateExtractor:
         if price_str:
             extracted["price"] = self.parse_number(price_str)
 
-        # Betriebskosten
-        bk_str = self.extract_field(html, self.BETRIEBSKOSTEN_PATTERNS)
+        # Betriebskosten / Nebenkosten
+        # Use min_value to reject placeholder values like "€1"
+        bk_str = self.extract_field(
+            html,
+            self.BETRIEBSKOSTEN_PATTERNS,
+            min_value=10.0,  # Reject unrealistic values under €10/month
+            max_value=2000.0  # Sanity check: max €2000/month
+        )
         if bk_str:
             extracted["betriebskosten_monthly"] = self.parse_number(bk_str)
 

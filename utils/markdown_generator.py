@@ -349,6 +349,10 @@ class MarkdownGenerator:
             content.append(
                 f"| {LABELS['betriebskosten']} | EUR {apartment.betriebskosten_monthly:,.0f}/Monat |"
             )
+        else:
+            content.append(
+                f"| {LABELS['betriebskosten']} | ⚠️ Nicht verfügbar |"
+            )
         if apartment.estimated_rent:
             content.append(
                 f"| {LABELS['estimated_rent']} | EUR {apartment.estimated_rent:,.0f}/Monat |"
@@ -487,6 +491,16 @@ class MarkdownGenerator:
                 for factor in apartment.risk_factors:
                     content.append(f"- {factor}")
                 content.append("")
+
+        # Warning for missing betriebskosten
+        if apartment.betriebskosten_monthly is None:
+            content.append("\n---\n")
+            content.append("### ⚠️ Wichtiger Hinweis\n")
+            content.append(
+                f"**Betriebskosten konnten nicht automatisch extrahiert werden.** "
+                f"Bitte prüfen Sie diese Information manuell auf der [Willhaben-Seite]({apartment.source_url}).\n"
+            )
+            content.append("")
 
         # Regulatory
         if (
