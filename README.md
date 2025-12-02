@@ -8,7 +8,11 @@ A Python-based web crawler for extracting apartment listings from willhaben.at (
 - Smart pagination (crawls until no more results found)
 - Configurable search parameters (location area IDs, price range)
 - Ad filtering (excludes promoted listings)
-- Multi-strategy data extraction (JSON-LD, regex patterns, optional LLM)
+- **Robust data extraction** with validation:
+  - Multi-strategy: JSON-LD → Regex → Optional LLM
+  - Strict validation (size ≥ 10 m²) prevents extraction errors
+  - Negative lookbehind patterns reject partial numbers
+  - Diagnostic logging for troubleshooting
 - **Investment Analysis**:
   - Yield calculations (gross/net)
   - Cash flow projections
@@ -274,10 +278,16 @@ noessi-crawl/
 ### Data Extraction Pipeline
 
 1. **JSON-LD** (primary): Extracts structured data from script tags
-2. **Regex patterns** (fallback): German real estate terminology
-3. **LLM extraction** (optional): Ollama for missing fields
+2. **Regex patterns** (robust fallback):
+   - Negative lookbehind prevents matching partial numbers (rejects "0,43 m²")
+   - Requires 2+ digits or 1-9 start to avoid leading zeros
+   - Min/max validation at extraction (size: 10-500 m²)
+   - Range detection with conservative lower-bound extraction
+3. **Critical field validation**:
+   - Strict minimums: size ≥ 10 m², price > 0, costs > 0
+   - Diagnostic logging shows extracted values for debugging
+4. **LLM extraction** (optional): Ollama for missing fields
    - Robust timeout handling (10s connect, 120s read, 180s hard timeout)
-   - Comprehensive logging for visibility and debugging
    - Graceful failures - continues without LLM data if unavailable
 
 ### Austrian-Specific Features
@@ -298,13 +308,18 @@ noessi-crawl/
 
 - **Async operations**: Python asyncio with crawl4ai's AsyncWebCrawler
 - **Headless browser**: Playwright for JavaScript rendering
-- **Multi-strategy extraction**: JSON-LD → Regex → LLM
+- **Multi-strategy extraction**: JSON-LD → Regex (robust patterns) → LLM
+- **Validation layers**:
+  - Pattern-level: Negative lookbehind, digit requirements
+  - Extraction-level: min/max value filters (10-500 m²)
+  - Post-extraction: Critical field validation with strict minimums
 - **Error handling**: Graceful failures with comprehensive logging
 - **Timeout protection**: Multiple layers prevent indefinite hangs
   - Connect timeout: 10s (Ollama availability checks)
   - Read timeout: 120s (LLM inference time)
   - Hard timeout: 180s (entire LLM operation via asyncio.wait_for)
-- **Progress tracking**: Detailed logs show extraction strategy, progress, timing, and errors
+- **Diagnostic logging**: INFO-level logs for extracted values, helpful for troubleshooting
+- **Test coverage**: 42 unit tests covering extraction, validation, range parsing
 
 ## Dependencies
 
@@ -314,29 +329,40 @@ Key packages (see `pyproject.toml`):
 - `httpx >= 0.27.0` - Async HTTP (for Ollama)
 - `pyyaml >= 6.0` - YAML frontmatter
 - `fpdf2 >= 2.8.5` - PDF generation
+- `pytest >= 9.0.1` - Testing framework
+
+## Testing
+
+```bash
+# Run all unit tests (42 tests covering extraction, validation, range parsing)
+uv run pytest tests/ -v
+
+# Test specific modules
+uv run pytest tests/test_extraction.py -v      # Regex patterns and validation (18 tests)
+uv run pytest tests/test_range_parsing.py -v   # Range detection (15 tests)
+uv run pytest tests/test_validation.py -v      # Critical field validation (9 tests)
+
+# Integration tests
+uv run python tests/test_simple.py      # Basic scraping functionality
+uv run python tests/test_single.py      # Single apartment extraction
+uv run python tests/test_star_icon.py   # Ad filtering (star icon detection)
+```
 
 ## Troubleshooting
 
-### LLM Extraction Issues
+### Extraction Issues
 
-**Scraper hangs when `use_llm: true`:**
-- Ensure Ollama is running: `curl http://localhost:11434/api/tags`
-- Check logs - will show "Checking Ollama availability..." and timeout after 10s if unreachable
-- Hard timeout (180s) prevents indefinite hangs
-- Look for "Cannot connect to Ollama" or "Ollama timeout" in logs
+**Too many apartments rejected:**
+- Check logs for "Missing critical fields: ..." warnings
+- Look for "Regex extracted size_sqm: X m²" in INFO logs
+- Common cause: size_sqm < 10 m² indicates extraction error (e.g., "0.43" instead of "43")
+- Run tests to validate patterns: `uv run pytest tests/test_extraction.py -v`
 
-**LLM extraction fails:**
-- Verify Ollama is installed and running
-- Check model is available: `ollama list` (should show `qwen3:8b` or your configured model)
-- Pull model if missing: `ollama pull qwen3:8b`
-- Scraper continues gracefully without LLM data on failures
-
-**Monitoring Progress:**
-- Logs show detailed progress: "Processing apartment (Total so far: X)"
-- LLM operations logged: availability checks, extraction attempts (1/3, 2/3, 3/3), success/failures
-- Timing information helps identify bottlenecks
-
-### Other Issues
+**Wrong field values (e.g., absurd price_per_sqm):**
+- Usually caused by size_sqm extraction errors
+- Check diagnostic logs for "Regex extracted size_sqm: ..."
+- Example: 0.43 m² instead of 43 m² → price_per_sqm = €313,953 instead of €3,140
+- Validate patterns work: `uv run pytest tests/test_extraction.py::TestSizeExtractionPatterns -v`
 
 **No listings found:**
 - Verify `postal_codes` or `area_ids` are correct in config.json
@@ -345,6 +371,23 @@ Key packages (see `pyproject.toml`):
 **Failed to fetch pages:**
 - Ensure Playwright browsers are installed: `playwright install`
 - Check network connectivity
+
+### LLM Extraction Issues
+
+**Scraper hangs when `use_llm: true`:**
+- Ensure Ollama is running: `curl http://localhost:11434/api/tags`
+- Check logs - will show "Checking Ollama availability..." and timeout after 10s if unreachable
+- Hard timeout (180s) prevents indefinite hangs
+
+**LLM extraction fails:**
+- Verify Ollama is installed and running: `ollama list`
+- Pull model if missing: `ollama pull qwen3:8b`
+- Scraper continues gracefully without LLM data on failures
+
+**Monitoring Progress:**
+- Logs show detailed progress: "Processing apartment (Total so far: X)"
+- Diagnostic logs: "Regex extracted size_sqm: ..." for critical fields
+- LLM operations logged: availability checks, extraction attempts, success/failures
 
 ## Limitations
 

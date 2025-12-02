@@ -207,6 +207,14 @@ class EnhancedApartmentScraper:
 
         # Strategy 2: Extract using regex patterns (more authoritative for betriebskosten)
         regex_data = self.extractor.extract_from_html(html)
+
+        # Diagnostic logging for critical fields
+        if "size_sqm" in regex_data:
+            logger.info(
+                f"Regex extracted size_sqm: {regex_data['size_sqm']} m² "
+                f"for {url}"
+            )
+
         self._apply_regex_data(apartment, regex_data, allow_betriebskosten_overwrite=True)
 
         # Extract address
@@ -272,6 +280,21 @@ class EnhancedApartmentScraper:
 
         # Enrich location data from area_ids if missing
         self._enrich_location_from_area_ids(apartment)
+
+        # Validate critical fields (after all extraction strategies)
+        is_valid, rejection_reason = self._validate_critical_fields(apartment)
+        if not is_valid:
+            logger.warning(
+                f"Rejecting apartment {listing_id} ({apartment.title or 'untitled'}): "
+                f"{rejection_reason} | URL: {url}"
+            )
+            return None  # Apartment rejected - will not be saved or analyzed
+
+        logger.debug(
+            f"Apartment {listing_id} passed validation: "
+            f"price=€{apartment.price:,.0f}, size={apartment.size_sqm}m², "
+            f"BK=€{apartment.betriebskosten_monthly}/mo"
+        )
 
         # Diagnostic mode: save extraction data for debugging
         if self.config.get("extraction", {}).get("diagnostic_mode", False):
@@ -401,6 +424,40 @@ class EnhancedApartmentScraper:
         #
         # We now rely solely on extracted address data from the listing HTML.
         pass
+
+    def _validate_critical_fields(self, apartment: ApartmentListing) -> tuple[bool, Optional[str]]:
+        """
+        Validate that critical fields are present for investment analysis.
+
+        Critical fields:
+        - price: Must have a purchase price
+        - size_sqm: Must know apartment size for per-sqm calculations
+        - betriebskosten_monthly: Essential for cash flow and yield analysis
+
+        Returns:
+            (is_valid, rejection_reason)
+            - (True, None) if all critical fields present
+            - (False, "reason") if any critical field missing
+        """
+        missing_fields = []
+
+        # Check price
+        if not apartment.price or apartment.price <= 0:
+            missing_fields.append("price")
+
+        # Check size - must be at least 10 m² (reject extraction errors)
+        if not apartment.size_sqm or apartment.size_sqm < 10.0:
+            missing_fields.append("size_sqm")
+
+        # Check operating costs
+        if not apartment.betriebskosten_monthly or apartment.betriebskosten_monthly <= 0:
+            missing_fields.append("betriebskosten_monthly")
+
+        if missing_fields:
+            reason = f"Missing critical fields: {', '.join(missing_fields)}"
+            return (False, reason)
+
+        return (True, None)
 
     def _apply_llm_data(
         self, apartment: ApartmentListing, data: Dict[str, Any]

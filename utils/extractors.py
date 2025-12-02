@@ -12,54 +12,64 @@ logger = logging.getLogger(__name__)
 class AustrianRealEstateExtractor:
     """Extractor for Austrian real estate listings using regex patterns."""
 
-    # Size patterns (German)
+    # Size patterns (German) - updated to capture ranges, reject leading zeros
     SIZE_PATTERNS: List[Pattern] = [
-        re.compile(r"(\d+[.,]?\d*)\s*m[²2]", re.IGNORECASE),
-        re.compile(r"Wohnfläche[:\s]*(\d+[.,]?\d*)", re.IGNORECASE),
-        re.compile(r"Nutzfläche[:\s]*(\d+[.,]?\d*)", re.IGNORECASE),
-        re.compile(r"Fläche[:\s]*(\d+[.,]?\d*)", re.IGNORECASE),
+        # First priority: ranges with m² (captures full range including dash/bis/to/~)
+        re.compile(r"(?<![0-9.,])(\d+(?:[.,]\d+)?[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)\s*m[²2]", re.IGNORECASE),
+
+        # Second priority: 2+ digits starting with 1-9 followed by m²
+        re.compile(r"(?<![0-9.,])([1-9]\d+(?:[.,]\d+)?)\s*m[²2]", re.IGNORECASE),
+
+        # Labeled patterns with word boundaries (capture ranges in labels)
+        re.compile(r"\bWohnfläche[:\s]*(\d+(?:[.,]\d+)?(?:[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)?)", re.IGNORECASE),
+        re.compile(r"\bNutzfläche[:\s]*(\d+(?:[.,]\d+)?(?:[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)?)", re.IGNORECASE),
+        re.compile(r"\bFläche[:\s]*(\d+(?:[.,]\d+)?(?:[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)?)", re.IGNORECASE),
+
+        # Fallback: any number with 2+ digits and m²
+        re.compile(r"(?<![0-9.,])(\d{2,}(?:[.,]\d+)?)\s*m[²2]", re.IGNORECASE),
     ]
 
-    # Room patterns
+    # Room patterns - updated to capture ranges, require 1-9 start
     ROOM_PATTERNS: List[Pattern] = [
-        re.compile(r"(\d+[.,]?\d*)\s*Zimmer", re.IGNORECASE),
-        re.compile(r"(\d+[.,]?\d*)\s*Zi\.?", re.IGNORECASE),
-        re.compile(r"(\d+[.,]?\d*)\s*Räume", re.IGNORECASE),
+        # Require 1-9 digit start, capture ranges with dash/bis/to/~
+        re.compile(r"([1-9](?:[.,]\d+)?(?:[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)?)\s*Zimmer", re.IGNORECASE),
+        re.compile(r"([1-9](?:[.,]\d+)?(?:[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)?)\s*Zi\.?", re.IGNORECASE),
+        re.compile(r"([1-9](?:[.,]\d+)?(?:[\s-]+(?:bis|to|~)?[\s-]*\d+(?:[.,]\d+)?)?)\s*Räume", re.IGNORECASE),
     ]
 
-    # Price patterns
+    # Price patterns - updated to capture ranges
     PRICE_PATTERNS: List[Pattern] = [
-        re.compile(r"€\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"([\d.,]+)\s*€", re.IGNORECASE),
-        re.compile(r"EUR\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"([\d.,]+)\s*EUR", re.IGNORECASE),
-        re.compile(r"Kaufpreis[:\s]*([\d.,]+)", re.IGNORECASE),
+        re.compile(r"€\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)\s*€", re.IGNORECASE),
+        re.compile(r"EUR\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)\s*EUR", re.IGNORECASE),
+        re.compile(r"Kaufpreis[:\s]*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
     ]
 
-    # Operating costs (Betriebskosten / Nebenkosten)
+    # Operating costs (Betriebskosten / Nebenkosten) - updated to capture ranges
     # Note: willhaben.at uses "Nebenkosten" instead of "Betriebskosten"
     BETRIEBSKOSTEN_PATTERNS: List[Pattern] = [
         # Inline patterns (label adjacent to value)
-        re.compile(r"Betriebskosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"Nebenkosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),  # NEW: willhaben.at term
-        re.compile(r"BK[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"NK[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),  # NEW: Nebenkosten abbreviation
-        re.compile(r"monatl\.?\s*(?:Betriebs|Neben)kosten[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
+        re.compile(r"Betriebskosten[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"Nebenkosten[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"BK[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"NK[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"monatl\.?\s*(?:Betriebs|Neben)kosten[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
 
         # Separated DOM patterns (label and value in different elements)
-        re.compile(r"(?:Betriebs|Neben)kosten.*?€\s*([\d.,]+)", re.IGNORECASE | re.DOTALL),
-        re.compile(r"(?:BK|NK).*?€\s*([\d.,]+)", re.IGNORECASE | re.DOTALL),
+        re.compile(r"(?:Betriebs|Neben)kosten.*?€\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE | re.DOTALL),
+        re.compile(r"(?:BK|NK).*?€\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE | re.DOTALL),
 
         # Table cell patterns (common in real estate listings)
-        re.compile(r"<td[^>]*>(?:Betriebs|Neben)kosten</td>\s*<td[^>]*>€?\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r">(?:Betriebs|Neben)kosten<.*?>€\s*([\d.,]+)<", re.IGNORECASE | re.DOTALL),
+        re.compile(r"<td[^>]*>(?:Betriebs|Neben)kosten</td>\s*<td[^>]*>€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r">(?:Betriebs|Neben)kosten<.*?>€\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)<", re.IGNORECASE | re.DOTALL),
     ]
 
-    # Reparaturrücklage (repair fund)
+    # Reparaturrücklage (repair fund) - updated to capture ranges
     REPARATUR_PATTERNS: List[Pattern] = [
-        re.compile(r"Reparaturrücklage[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"Rep\.?\s*Rücklage[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
-        re.compile(r"Rücklage[:\s]*€?\s*([\d.,]+)", re.IGNORECASE),
+        re.compile(r"Reparaturrücklage[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"Rep\.?\s*Rücklage[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
+        re.compile(r"Rücklage[:\s]*€?\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
     ]
 
     # Floor patterns
@@ -180,6 +190,7 @@ class AustrianRealEstateExtractor:
         group: int = 1,
         min_value: Optional[float] = None,
         max_value: Optional[float] = None,
+        parse_ranges: bool = True,
     ) -> Optional[str]:
         """
         Extract first matching value from text using patterns.
@@ -190,6 +201,7 @@ class AustrianRealEstateExtractor:
             group: Regex group number to extract (default: 1)
             min_value: Minimum acceptable numeric value (filters out placeholders)
             max_value: Maximum acceptable numeric value (sanity check)
+            parse_ranges: If True, detect ranges and extract lower value (default: True)
 
         Returns:
             Matched string value, or None if no valid match found
@@ -201,13 +213,20 @@ class AustrianRealEstateExtractor:
 
                 # If validation requested, check numeric bounds
                 if min_value is not None or max_value is not None:
-                    parsed = self.parse_number(value_str)
+                    # Use range-aware parsing if requested
+                    parsed = self.parse_number_with_range(value_str) if parse_ranges else self.parse_number(value_str)
                     if parsed is not None:
                         if min_value is not None and parsed < min_value:
                             # Skip this match - too low (likely placeholder)
+                            logger.debug(
+                                f"Rejected value {parsed} (< min {min_value}) from '{value_str}'"
+                            )
                             continue
                         if max_value is not None and parsed > max_value:
                             # Skip this match - too high (likely error)
+                            logger.debug(
+                                f"Rejected value {parsed} (> max {max_value}) from '{value_str}'"
+                            )
                             continue
 
                 return value_str
@@ -218,15 +237,96 @@ class AustrianRealEstateExtractor:
         return bool(pattern.search(text))
 
     def parse_number(self, value: str) -> Optional[float]:
-        """Parse German-formatted number to float."""
+        """Parse German-formatted number to float.
+
+        Handles German number format where:
+        - Dot (.) is thousands separator
+        - Comma (,) is decimal separator
+
+        Examples:
+            "100.000" → 100000.0
+            "2,5" → 2.5
+            "100.000,50" → 100000.5
+        """
         if not value:
             return None
-        # Remove spaces and handle German number format
-        cleaned = value.strip().replace(" ", "").replace(".", "").replace(",", ".")
+        # Handle German number format:
+        # 1. Remove spaces
+        # 2. Replace comma (decimal separator) with placeholder
+        # 3. Remove all dots (thousands separators)
+        # 4. Replace placeholder with dot
+        cleaned = value.strip().replace(" ", "").replace(",", "###DECIMAL###").replace(".", "").replace("###DECIMAL###", ".")
         try:
             return float(cleaned)
         except ValueError:
             return None
+
+    def parse_number_with_range(self, value: str) -> Optional[float]:
+        """
+        Parse German-formatted number, handling ranges by returning lower value.
+
+        Detects patterns:
+        - "40-140" or "40 - 140"
+        - "40 bis 140"
+        - "40~140" or "40 ~ 140"
+        - "40 to 140"
+
+        Returns the LOWER value (conservative approach for investment analysis).
+
+        Args:
+            value: String potentially containing a number or range
+
+        Returns:
+            Float value (lower bound if range detected), or None if unparseable
+
+        Examples:
+            "40-140 m²" → 40.0
+            "100.000-150.000" → 100000.0
+            "2,5 bis 3,5" → 2.5
+            "50" → 50.0
+        """
+        if not value:
+            return None
+
+        # Clean the string
+        cleaned = value.strip()
+
+        # Range separators (in order of specificity)
+        range_patterns = [
+            r'(\d+[.,\s]*\d*)\s*-\s*(\d+[.,\s]*\d*)',      # "40-140" or "40 - 140"
+            r'(\d+[.,\s]*\d*)\s+bis\s+(\d+[.,\s]*\d*)',    # "40 bis 140"
+            r'(\d+[.,\s]*\d*)\s*~\s*(\d+[.,\s]*\d*)',      # "40~140"
+            r'(\d+[.,\s]*\d*)\s+to\s+(\d+[.,\s]*\d*)',     # "40 to 140"
+        ]
+
+        for pattern in range_patterns:
+            match = re.search(pattern, cleaned, re.IGNORECASE)
+            if match:
+                lower_str = match.group(1)
+                upper_str = match.group(2)
+
+                # Parse both bounds
+                lower = self.parse_number(lower_str)
+                upper = self.parse_number(upper_str)
+
+                if lower is not None and upper is not None:
+                    # Validate: lower should be less than upper
+                    if lower < upper:
+                        logger.debug(
+                            f"Range detected: '{value}' → using lower bound {lower} "
+                            f"(upper: {upper})"
+                        )
+                        return lower
+                    else:
+                        logger.warning(
+                            f"Invalid range detected (lower >= upper): '{value}' "
+                            f"(lower: {lower}, upper: {upper}), using lower value"
+                        )
+                        # For invalid range, still return the lower value (first number)
+                        return lower
+
+        # No range detected - parse as single number
+        return self.parse_number(value)
 
     def parse_district_from_postal(self, postal_code: str) -> Optional[int]:
         """
@@ -306,10 +406,10 @@ class AustrianRealEstateExtractor:
 
                         # Look for betriebskosten/nebenkosten keywords
                         if any(keyword in label_text for keyword in ['betriebskosten', 'nebenkosten', 'bk', 'nk']):
-                            # Extract numeric value
-                            value_match = re.search(r'([\d.,]+)', value_text)
+                            # Extract numeric value (allow dash for ranges)
+                            value_match = re.search(r'([\d.,\s-]+)', value_text)
                             if value_match:
-                                bk_value = self.parse_number(value_match.group(1))
+                                bk_value = self.parse_number_with_range(value_match.group(1))
                                 # Validate range (reject placeholders)
                                 if bk_value and 20 <= bk_value < 2000:
                                     extracted["betriebskosten_monthly"] = bk_value
@@ -336,36 +436,43 @@ class AustrianRealEstateExtractor:
         """
         extracted: Dict[str, Any] = {}
 
-        # Size
-        size_str = self.extract_field(html, self.SIZE_PATTERNS)
+        # Size - with range parsing and validation (10-500 m²)
+        size_str = self.extract_field(
+            html,
+            self.SIZE_PATTERNS,
+            parse_ranges=True,
+            min_value=10.0,   # Reject < 10 m² (extraction errors)
+            max_value=500.0   # Sanity check: reject mansions/commercial
+        )
         if size_str:
-            extracted["size_sqm"] = self.parse_number(size_str)
+            extracted["size_sqm"] = self.parse_number_with_range(size_str)
 
-        # Rooms
-        rooms_str = self.extract_field(html, self.ROOM_PATTERNS)
+        # Rooms - with range parsing
+        rooms_str = self.extract_field(html, self.ROOM_PATTERNS, parse_ranges=True)
         if rooms_str:
-            extracted["rooms"] = self.parse_number(rooms_str)
+            extracted["rooms"] = self.parse_number_with_range(rooms_str)
 
-        # Price
-        price_str = self.extract_field(html, self.PRICE_PATTERNS)
+        # Price - with range parsing
+        price_str = self.extract_field(html, self.PRICE_PATTERNS, parse_ranges=True)
         if price_str:
-            extracted["price"] = self.parse_number(price_str)
+            extracted["price"] = self.parse_number_with_range(price_str)
 
-        # Betriebskosten / Nebenkosten
+        # Betriebskosten / Nebenkosten - with range parsing
         # Use min_value to reject placeholder values like "€1"
         bk_str = self.extract_field(
             html,
             self.BETRIEBSKOSTEN_PATTERNS,
             min_value=10.0,  # Reject unrealistic values under €10/month
-            max_value=2000.0  # Sanity check: max €2000/month
+            max_value=2000.0,  # Sanity check: max €2000/month
+            parse_ranges=True
         )
         if bk_str:
-            extracted["betriebskosten_monthly"] = self.parse_number(bk_str)
+            extracted["betriebskosten_monthly"] = self.parse_number_with_range(bk_str)
 
-        # Reparaturrücklage
-        rep_str = self.extract_field(html, self.REPARATUR_PATTERNS)
+        # Reparaturrücklage - with range parsing
+        rep_str = self.extract_field(html, self.REPARATUR_PATTERNS, parse_ranges=True)
         if rep_str:
-            extracted["reparaturrucklage"] = self.parse_number(rep_str)
+            extracted["reparaturrucklage"] = self.parse_number_with_range(rep_str)
 
         # Floor
         floor_info = self.extract_floor(html)

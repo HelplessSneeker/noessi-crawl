@@ -80,9 +80,12 @@ noessi-crawl/
 │       ├── summary_report.md      # Markdown summary
 │       └── investment_summary.pdf # PDF report
 ├── tests/                         # Test scripts
-│   ├── test_simple.py
-│   ├── test_single.py
-│   └── test_star_icon.py
+│   ├── test_extraction.py         # Unit tests: regex patterns, validation
+│   ├── test_range_parsing.py      # Unit tests: range detection
+│   ├── test_validation.py         # Unit tests: critical field validation
+│   ├── test_simple.py             # Integration: basic scraping
+│   ├── test_single.py             # Integration: single apartment
+│   └── test_star_icon.py          # Integration: ad filtering
 ├── CLAUDE.md                      # This file
 └── README.md                      # User documentation
 ```
@@ -192,10 +195,11 @@ The `EnhancedApartmentScraper` class orchestrates the entire process:
 2. **URL Building**: `build_willhaben_url()` constructs search URL with area_ids and price_max
 3. **Page Scraping**: `scrape_page()` fetches listing page, extracts URLs from JSON-LD
 4. **Apartment Processing**: `process_apartment()` fetches detail page, extracts data
-5. **Multi-strategy Extraction**: JSON-LD → Regex → LLM (if enabled)
-6. **Investment Analysis**: `InvestmentAnalyzer.analyze_apartment()` calculates metrics and score
-7. **Sorting and Saving**: `_save_apartments()` ranks by score, saves top N to active, rest to rejected
-8. **Report Generation**: `_generate_summary_report()` and `_generate_pdf_report()` create synchronized reports
+5. **Multi-strategy Extraction**: JSON-LD → DOM → Regex (with range parsing) → LLM (if enabled)
+6. **Critical Field Validation**: Rejects apartments missing price, size_sqm, or betriebskosten_monthly
+7. **Investment Analysis**: `InvestmentAnalyzer.analyze_apartment()` calculates metrics and score
+8. **Sorting and Saving**: `_save_apartments()` ranks by score, saves top N to active, rest to rejected
+9. **Report Generation**: `_generate_summary_report()` and `_generate_pdf_report()` create synchronized reports
 
 ### Data Extraction Pipeline
 
@@ -207,10 +211,17 @@ The `EnhancedApartmentScraper` class orchestrates the entire process:
    - Most reliable but may miss apartment-specific fields
 
 2. **Regex Extraction** (`AustrianRealEstateExtractor`):
-   - Patterns for German real estate terminology
-   - Betriebskosten, Reparaturrücklage, Zimmer, m², Stock, Baujahr
-   - Boolean features: Aufzug (elevator), Balkon, Terrasse, Parkplatz
-   - Energy ratings, condition, building type
+   - **Robust patterns** rejecting common extraction errors:
+     - Negative lookbehind `(?<![0-9.,])` prevents matching partial numbers
+     - Requires 2+ digits or 1-9 start to reject "0,43 m²" errors
+     - Priority: ranges first, then specific digits with m²
+   - **German terminology**: Betriebskosten, Reparaturrücklage, Zimmer, m², Stock, Baujahr
+   - **Boolean features**: Aufzug (elevator), Balkon, Terrasse, Parkplatz
+   - **Range parsing**: Automatically extracts lower value from ranges
+     - Patterns: "40-140 m²", "100.000-150.000 EUR", "2,5 bis 3,5 Zimmer"
+     - Separators: `-`, `bis`, `~`, `to`
+     - Conservative: Always takes lower value for investment analysis
+   - **Validation at extraction**: min_value/max_value filters (size: 10-500 m²)
 
 3. **Address Extraction** (`_extract_address_from_html()`):
    - Multiple strategies: JSON-LD address, HTML patterns, URL parsing
@@ -228,6 +239,14 @@ The `EnhancedApartmentScraper` class orchestrates the entire process:
 5. **Location Enrichment** (`_enrich_location_from_area_ids()`):
    - If postal_code/city missing, infers from configured area_ids
    - Uses `AREA_ID_TO_LOCATION` mapping in constants.py
+
+6. **Critical Field Validation** (`_validate_critical_fields()`):
+   - Validates after ALL extraction strategies complete (JSON-LD, DOM, Regex, LLM)
+   - **Required fields**: price > 0, size_sqm ≥ 10 m², betriebskosten_monthly > 0
+   - **Strict size validation**: Minimum 10 m² rejects extraction errors like 0.43 m²
+   - Logged rejections at WARNING level with clear reasons
+   - Prevents incomplete/invalid data from polluting investment analysis
+   - Diagnostic logging: INFO-level logs show extracted size_sqm values for debugging
 
 ### Investment Analysis (llm/analyzer.py)
 
@@ -396,14 +415,18 @@ The `ApartmentListing` dataclass (models/apartment.py) contains ~65 fields:
 ## Testing
 
 ```bash
-# Test basic scraping functionality
-uv run python tests/test_simple.py
+# Run all unit tests (extraction, validation, range parsing)
+uv run pytest tests/ -v
 
-# Test single apartment extraction
-uv run python tests/test_single.py
+# Test specific modules
+uv run pytest tests/test_extraction.py -v      # Regex patterns and validation
+uv run pytest tests/test_range_parsing.py -v   # Range detection
+uv run pytest tests/test_validation.py -v      # Critical field validation
 
-# Test ad filtering (star icon detection)
-uv run python tests/test_star_icon.py
+# Integration tests
+uv run python tests/test_simple.py      # Basic scraping
+uv run python tests/test_single.py      # Single apartment extraction
+uv run python tests/test_star_icon.py   # Ad filtering
 ```
 
 ## Common Development Tasks
@@ -445,9 +468,11 @@ Edit `utils/pdf_generator.py` for PDF changes:
 ### Adding New Extraction Patterns
 
 Edit `utils/extractors.py`, `AustrianRealEstateExtractor`:
-- Add regex patterns to `extract_from_html()`
-- Update field extraction methods
-- Test with actual HTML samples
+- **Use negative lookbehind** `(?<![0-9.,])` to prevent matching partial numbers
+- **Require 2+ digits** or 1-9 start to avoid leading zeros
+- **Add min/max validation** to `extract_field()` calls for numeric fields
+- **Test with actual HTML samples** and add unit tests in `tests/test_extraction.py`
+- **Pattern priority**: ranges first, then specific patterns, fallbacks last
 
 ### Customizing German Translations
 
@@ -470,22 +495,32 @@ Edit `utils/translations.py`:
 
 ## Troubleshooting
 
-**"No listings found"**: Check area_ids mapping in constants.py, or max_pages limit  
-**"Failed to fetch"**: Playwright not installed or network issues  
-**LLM extraction hangs**: 
-- Check Ollama is running: `curl http://localhost:11434/api/tags`
-- Logs will show "Checking Ollama availability..." and timeout after 10s if unreachable
-- Hard timeout wrapper prevents indefinite hangs (180s max)
-- Check logs for "Cannot connect to Ollama" or "Ollama timeout" messages
+**Too many apartments rejected**:
+- Check logs for "Missing critical fields" warnings
+- Look for "Regex extracted size_sqm: X m²" in INFO logs
+- Common issue: size_sqm < 10 m² indicates extraction error (e.g., "0,43" instead of "43")
+- Run unit tests: `uv run pytest tests/test_extraction.py -v`
 
-**LLM extraction fails**: 
-- Verify Ollama is running and model is pulled: `ollama list`
-- Check logs for detailed error messages (attempt number, timeout duration)
+**Wrong field values** (e.g., price_per_sqm too high):
+- Usually caused by size_sqm extraction errors
+- Check diagnostic logs: "Regex extracted size_sqm: ..."
+- Validate patterns reject leading zeros: `pytest tests/test_extraction.py::TestSizeExtractionPatterns -v`
+
+**"No listings found"**: Check postal_codes in config.json, or max_pages limit
+
+**"Failed to fetch"**: Playwright not installed (`playwright install`) or network issues
+
+**LLM extraction hangs**:
+- Check Ollama is running: `curl http://localhost:11434/api/tags`
+- Logs show "Checking Ollama availability..." and timeout after 10s if unreachable
+- Hard timeout wrapper prevents indefinite hangs (180s max)
+
+**LLM extraction fails**:
+- Verify Ollama is running and model pulled: `ollama list`
 - Scraper continues gracefully without LLM data on failures
 
-**Wrong postal codes**: Update PLZ_TO_AREA_ID mapping in models/constants.py  
-**Missing translations**: Add to utils/translations.py  
-**Need more visibility**: Logs show progress tracking, extraction strategy used, and timing information
+**Wrong postal codes**: Update PLZ_TO_AREA_ID in models/constants.py
+**Missing translations**: Add to utils/translations.py
 
 ## Best Practices for Claude Code
 
