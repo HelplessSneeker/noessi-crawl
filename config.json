@@ -10,12 +10,11 @@
     "9504",
     "9523"
   ],
-  "price_max": 150000,
   "output_folder": "output",
-  "max_pages": null,
+  "max_pages": 1,
 
   "extraction": {
-    "use_llm": true,
+    "use_llm": false,
     "llm_model": "qwen3:8b",
     "fallback_to_regex": true,
     "cache_extracted": false,
@@ -25,7 +24,7 @@
 
   "filters": {
     "min_yield": null,
-    "max_price": null,
+    "max_price": 150000,
     "min_size_sqm": null,
     "max_size_sqm": null,
     "excluded_districts": [],
@@ -52,9 +51,8 @@
 
   "output": {
     "format": "individual_markdown",
-    "include_rejected": false,
     "generate_summary": true,
-    "summary_top_n": 20,
+    "pdf_top_n": 20,
     "generate_pdf": true,
     "pdf_filename": "investment_summary.pdf"
   },

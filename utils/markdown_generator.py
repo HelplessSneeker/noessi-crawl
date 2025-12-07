@@ -33,12 +33,8 @@ class MarkdownGenerator:
             output_dir: Base output directory for apartment files
         """
         self.output_dir = output_dir
-        self.active_dir = os.path.join(output_dir, "active")
-        self.rejected_dir = os.path.join(output_dir, "rejected")
-
-        # Ensure directories exist
-        os.makedirs(self.active_dir, exist_ok=True)
-        os.makedirs(self.rejected_dir, exist_ok=True)
+        # Note: active_dir and rejected_dir are deprecated
+        # New architecture uses flat apartments/ folder with immediate saving
 
     def generate_filename(self, apartment: ApartmentListing) -> str:
         """
@@ -310,12 +306,18 @@ class MarkdownGenerator:
         # Executive summary
         content.append(f"## {HEADERS['investment_summary']}\n")
         summary_parts = []
-        if apartment.size_sqm:
+        # Size (critical field)
+        if apartment.size_sqm and apartment.size_sqm >= 10:
             summary_parts.append(f"{apartment.size_sqm:.0f} m²")
+        else:
+            summary_parts.append("n/a m²")
         if apartment.rooms:
             summary_parts.append(f"{apartment.rooms} {LABELS['rooms']}")
-        if apartment.price:
+        # Price (critical field)
+        if apartment.price and apartment.price > 0:
             summary_parts.append(f"EUR {apartment.price:,.0f}")
+        else:
+            summary_parts.append("EUR n/a")
 
         # Location: just city (keep it simple)
         if apartment.city:
@@ -339,19 +341,26 @@ class MarkdownGenerator:
         content.append(f"| Kennzahl | Wert |")
         content.append("|--------|-------|")
 
-        if apartment.price:
+        # Price (critical field)
+        if apartment.price and apartment.price > 0:
             content.append(f"| {LABELS['price']} | EUR {apartment.price:,.0f} |")
+        else:
+            content.append(f"| {LABELS['price']} | n/a |")
+
+        # Price per sqm
         if apartment.price_per_sqm:
             content.append(
                 f"| {LABELS['price_per_sqm']} | EUR {apartment.price_per_sqm:,.0f} |"
             )
-        if apartment.betriebskosten_monthly:
+
+        # Betriebskosten (critical field)
+        if apartment.betriebskosten_monthly and apartment.betriebskosten_monthly > 0:
             content.append(
                 f"| {LABELS['betriebskosten']} | EUR {apartment.betriebskosten_monthly:,.0f}/Monat |"
             )
         else:
             content.append(
-                f"| {LABELS['betriebskosten']} | ⚠️ Nicht verfügbar |"
+                f"| {LABELS['betriebskosten']} | n/a |"
             )
         if apartment.estimated_rent:
             content.append(
@@ -376,8 +385,11 @@ class MarkdownGenerator:
         # Specifications
         content.append("### Spezifikationen\n")
         specs_table = []
-        if apartment.size_sqm:
+        # Size (critical field)
+        if apartment.size_sqm and apartment.size_sqm >= 10:
             specs_table.append(f"- **{LABELS['size']}:** {apartment.size_sqm:.0f} m²")
+        else:
+            specs_table.append(f"- **{LABELS['size']}:** n/a")
         if apartment.rooms:
             specs_table.append(f"- **{LABELS['rooms']}:** {apartment.rooms}")
         if apartment.floor_text:
@@ -553,8 +565,8 @@ class MarkdownGenerator:
         """
         # Generate filename
         filename = self.generate_filename(apartment)
-        output_dir = self.rejected_dir if rejected else self.active_dir
-        filepath = os.path.join(output_dir, filename)
+        # Note: rejected parameter is deprecated, now uses flat output_dir structure
+        filepath = os.path.join(self.output_dir, filename)
 
         # Generate content
         frontmatter = self.generate_yaml_frontmatter(apartment)

@@ -40,7 +40,7 @@ A Python-based web crawler for extracting apartment listings from willhaben.at (
 uv sync
 
 # Install Playwright browsers (required for crawl4ai)
-playwright install
+uv run playwright install
 
 # Optional: Install Ollama for LLM extraction
 # See https://ollama.ai for installation
@@ -369,7 +369,7 @@ uv run python tests/test_star_icon.py   # Ad filtering (star icon detection)
 - Check `max_pages` isn't too restrictive
 
 **Failed to fetch pages:**
-- Ensure Playwright browsers are installed: `playwright install`
+- Ensure Playwright browsers are installed: `uv run playwright install`
 - Check network connectivity
 
 ### LLM Extraction Issues

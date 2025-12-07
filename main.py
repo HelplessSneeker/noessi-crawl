@@ -14,10 +14,12 @@ from llm.analyzer import InvestmentAnalyzer
 from llm.extractor import OllamaExtractor
 from models.apartment import ApartmentListing
 from models.constants import AREA_ID_TO_LOCATION, PLZ_TO_AREA_ID
+from models.metadata import ApartmentMetadata
 from utils.address_parser import AustrianAddressParser
 from utils.extractors import AustrianRealEstateExtractor
 from utils.markdown_generator import MarkdownGenerator
 from utils.pdf_generator import PDFGenerator
+from utils.top_n_tracker import TopNTracker
 from utils.translations import HEADERS, LABELS, PHRASES, RECOMMENDATIONS, TABLE_HEADERS
 
 # Configure logging
@@ -76,17 +78,22 @@ class EnhancedApartmentScraper:
         output_config = config.get("output", {})
         self.include_rejected = output_config.get("include_rejected", False)
         self.generate_summary = output_config.get("generate_summary", True)
-        self.summary_top_n = output_config.get("summary_top_n", 20)
+        # Support both old and new config field names
+        self.pdf_top_n = output_config.get("pdf_top_n", output_config.get("summary_top_n", 20))
 
         # Rate limiting
         rate_config = config.get("rate_limiting", {})
         self.delay_apartment = rate_config.get("delay_apartment", 0.5)
         self.delay_page = rate_config.get("delay_page", 1.0)
 
-        # Tracking
+        # Tracking - NEW: lightweight metadata instead of full objects
         self.seen_listings: Set[str] = set()
-        self.processed_apartments: List[ApartmentListing] = []
-        self.apartment_files: Dict[str, str] = {}  # listing_id -> filepath
+        self.apartment_metadata: List[ApartmentMetadata] = []
+        self.top_n_tracker = TopNTracker(self.pdf_top_n)
+
+        # Create apartments subfolder immediately
+        self.apartments_folder = self.run_folder / "apartments"
+        self.apartments_folder.mkdir(parents=True, exist_ok=True)
 
         # Translate postal codes to area_ids for willhaben
         self.area_ids = self._translate_postal_codes_to_area_ids()
@@ -128,10 +135,10 @@ class EnhancedApartmentScraper:
         for area_id in self.area_ids:
             params.append(f"areaId={area_id}")
 
-        # Add price threshold
-        price_max = self.config.get("price_max")
-        if price_max:
-            params.append(f"PRICE_TO={int(price_max)}")
+        # Add price threshold from filters
+        max_price = self.filters.get("max_price")
+        if max_price:
+            params.append(f"PRICE_TO={int(max_price)}")
 
         # Add pagination
         params.append(f"page={page}")
@@ -281,20 +288,8 @@ class EnhancedApartmentScraper:
         # Enrich location data from area_ids if missing
         self._enrich_location_from_area_ids(apartment)
 
-        # Validate critical fields (after all extraction strategies)
-        is_valid, rejection_reason = self._validate_critical_fields(apartment)
-        if not is_valid:
-            logger.warning(
-                f"Rejecting apartment {listing_id} ({apartment.title or 'untitled'}): "
-                f"{rejection_reason} | URL: {url}"
-            )
-            return None  # Apartment rejected - will not be saved or analyzed
-
-        logger.debug(
-            f"Apartment {listing_id} passed validation: "
-            f"price=€{apartment.price:,.0f}, size={apartment.size_sqm}m², "
-            f"BK=€{apartment.betriebskosten_monthly}/mo"
-        )
+        # Note: Validation now happens in process_apartment() to allow saving invalid apartments
+        # with validation_failed flag for manual review
 
         # Diagnostic mode: save extraction data for debugging
         if self.config.get("extraction", {}).get("diagnostic_mode", False):
@@ -749,9 +744,180 @@ class EnhancedApartmentScraper:
 
         return None
 
+    def _extract_metadata(
+        self,
+        apartment: ApartmentListing,
+        filepath: str,
+        validation_failed: bool,
+        validation_reason: Optional[str]
+    ) -> ApartmentMetadata:
+        """
+        Extract lightweight metadata from full apartment object.
+
+        Args:
+            apartment: Full apartment listing
+            filepath: Absolute filepath where apartment was saved
+            validation_failed: Whether validation failed
+            validation_reason: Reason for validation failure
+
+        Returns:
+            ApartmentMetadata instance for summary tracking
+        """
+        filename = Path(filepath).name
+
+        return ApartmentMetadata(
+            listing_id=apartment.listing_id,
+            filename=filename,
+            investment_score=apartment.investment_score,
+            recommendation=apartment.recommendation,
+            price=apartment.price,
+            size_sqm=apartment.size_sqm,
+            price_per_sqm=apartment.price_per_sqm,
+            gross_yield=apartment.gross_yield,
+            net_yield=apartment.net_yield,
+            monthly_cash_flow=apartment.cash_flow_monthly,  # FIX: correct attribute name
+            city=apartment.city,
+            postal_code=apartment.postal_code,
+            district=apartment.district,
+            title=apartment.title,
+            source_url=apartment.source_url,
+            validation_failed=validation_failed,
+            validation_reason=validation_reason,
+            scraped_at=apartment.scraped_at,
+        )
+
+    def _generate_filename_with_score(self, apartment: ApartmentListing, validation_failed: bool) -> str:
+        """
+        Generate filename with score prefix for easy sorting.
+
+        Format: YYYY-MM-DD_score_city_district_price.md
+        Example: 2025-12-06_8.5_Wien_3_250000.md
+                 2025-12-06_nv_Graz_150000.md (validation failed)
+
+        Args:
+            apartment: The apartment listing
+            validation_failed: Whether validation failed
+
+        Returns:
+            Filename string
+        """
+        timestamp = apartment.scraped_at.strftime("%Y-%m-%d")
+
+        # Score component
+        if validation_failed or apartment.investment_score is None:
+            score_str = "nv"  # nicht verfügbar
+        else:
+            score_str = f"{apartment.investment_score:.1f}"
+
+        # Location component - use "nv" for missing city
+        if apartment.city:
+            city_clean = re.sub(r'[^\w\s-]', '', apartment.city).strip().replace(' ', '_')
+        else:
+            city_clean = "nv"
+
+        # District component - use "nv" for missing district
+        if apartment.district_number:
+            district_str = f"_{apartment.district_number}"
+        elif apartment.district:
+            district_clean = re.sub(r'[^\w\s-]', '', apartment.district).strip().replace(' ', '_')
+            district_str = f"_{district_clean}"
+        else:
+            district_str = "_nv"
+
+        # Price component - use "nv" for missing/invalid price
+        if apartment.price and apartment.price > 0:
+            price_k = int(apartment.price / 1000)
+            price_str = f"{price_k}k"
+        else:
+            price_str = "nv"
+
+        filename = f"{timestamp}_{score_str}_{city_clean}{district_str}_{price_str}.md"
+        return filename
+
+    def _write_apartment_immediately(
+        self,
+        apartment: ApartmentListing,
+        validation_failed: bool = False,
+        validation_reason: Optional[str] = None
+    ) -> str:
+        """
+        Write apartment to disk immediately after extraction/analysis.
+
+        Args:
+            apartment: The apartment to write
+            validation_failed: Whether validation failed
+            validation_reason: Reason for validation failure
+
+        Returns:
+            Absolute filepath of written file (empty string if write failed)
+        """
+        import yaml
+
+        try:
+            # Generate filename
+            filename = self._generate_filename_with_score(apartment, validation_failed)
+            filepath = self.apartments_folder / filename
+
+            # Generate YAML frontmatter
+            apartment_dict = apartment.to_dict()
+
+            # Add validation status if failed
+            if validation_failed:
+                apartment_dict['validation'] = {
+                    'passed': False,
+                    'reason': validation_reason or "Unknown validation error",
+                }
+
+            frontmatter = yaml.dump(
+                apartment_dict,
+                allow_unicode=True,
+                sort_keys=False,
+                default_flow_style=False
+            )
+
+            # Generate markdown body
+            body_lines = []
+
+            # Add validation warning banner if needed
+            if validation_failed:
+                body_lines.append("> **⚠️ WARNUNG: Validierung fehlgeschlagen**")
+                body_lines.append(f"> {validation_reason}")
+                body_lines.append(">")
+                body_lines.append("> Alle extrahierten Daten wurden dennoch gespeichert für manuelle Prüfung.")
+                body_lines.append("")
+
+            # Generate normal markdown content
+            md_content = self.md_generator.generate_markdown_content(apartment)
+            body_lines.append(md_content)
+
+            body = "\n".join(body_lines)
+
+            # Write atomically (temp file + rename)
+            temp_path = filepath.with_suffix('.tmp')
+            full_content = f"---\n{frontmatter}---\n\n{body}"
+
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                f.write(full_content)
+
+            # Atomic rename
+            temp_path.rename(filepath)
+
+            # Log success
+            status = "[VALIDATION FAILED]" if validation_failed else "[OK]"
+            score_display = "n/a" if validation_failed or apartment.investment_score is None else f"{apartment.investment_score:.1f}"
+            logger.info(
+                f"{status} Written: {filename} (Score: {score_display})"
+            )
+
+            return str(filepath)
+
+        except Exception as e:
+            logger.error(f"Failed to write apartment {apartment.listing_id}: {e}")
+            return ""
+
     async def process_apartment(
         self, crawler: AsyncWebCrawler, url: str
-    ) -> Optional[ApartmentListing]:
+    ) -> Optional[ApartmentMetadata]:
         """
         Fetch and process a single apartment listing.
 
@@ -787,16 +953,49 @@ class EnhancedApartmentScraper:
             if not apartment:
                 return None
 
-            # Perform investment analysis
+            # Apply price filter - discard apartments above max_price
+            max_price = self.filters.get("max_price")
+            if max_price and apartment.price and apartment.price > max_price:
+                logger.info(
+                    f"Filtering out apartment {listing_id}: price €{apartment.price:,.0f} "
+                    f"exceeds max_price €{max_price:,.0f}"
+                )
+                return None
+
+            # Validate critical fields (but still write even if validation fails)
+            is_valid, validation_reason = self._validate_critical_fields(apartment)
+
+            # Perform investment analysis (even if validation failed - gives partial metrics)
             apartment = self.analyzer.analyze_apartment(apartment)
 
-            # Store all apartments - sorting and file generation happens at the end
-            self.processed_apartments.append(apartment)
-            logger.info(
-                f"Processed: {apartment.title or listing_id} "
-                f"(Score: {apartment.investment_score:.1f})"
+            # NEW: Write immediately to disk (ALL apartments, including validation failures)
+            filepath = self._write_apartment_immediately(
+                apartment,
+                validation_failed=not is_valid,
+                validation_reason=validation_reason
             )
-            return apartment
+
+            if not filepath:
+                # Disk write failed - log error but continue
+                logger.error(f"Failed to write apartment {listing_id} to disk")
+                return None
+
+            # NEW: Extract and store lightweight metadata
+            metadata = self._extract_metadata(
+                apartment,
+                filepath,
+                validation_failed=not is_valid,
+                validation_reason=validation_reason
+            )
+            logger.debug(f"Created metadata for {apartment.listing_id}: {metadata.filename}")
+            self.apartment_metadata.append(metadata)
+            logger.debug(f"Metadata list now has {len(self.apartment_metadata)} items")
+
+            # NEW: Track top N for PDF (only valid apartments)
+            if is_valid:
+                self.top_n_tracker.add(apartment)
+
+            return metadata
 
         except Exception as e:
             logger.error(f"Error processing {url}: {e}")
@@ -804,7 +1003,7 @@ class EnhancedApartmentScraper:
 
     async def scrape_page(
         self, crawler: AsyncWebCrawler, page: int
-    ) -> List[ApartmentListing]:
+    ) -> List[ApartmentMetadata]:
         """
         Scrape a single page of listings.
 
@@ -813,7 +1012,7 @@ class EnhancedApartmentScraper:
             page: Page number to scrape
 
         Returns:
-            List of processed apartments from this page
+            List of apartment metadata from this page
         """
         url = self.build_willhaben_url(page)
         logger.info(f"Scraping page {page}: {url}")
@@ -838,29 +1037,29 @@ class EnhancedApartmentScraper:
 
         # Process each listing
         page_apartments = []
-        total_so_far = len(self.processed_apartments)
+        total_so_far = len(self.apartment_metadata)
         for i, listing in enumerate(listings, 1):
             listing_url = listing["url"]
             logger.info(
                 f"  [{i}/{len(listings)}] Processing apartment (Total so far: {total_so_far}): {listing_url}"
             )
 
-            apartment = await self.process_apartment(crawler, listing_url)
-            if apartment:
-                page_apartments.append(apartment)
-                total_so_far = len(self.processed_apartments)
+            metadata = await self.process_apartment(crawler, listing_url)
+            if metadata:
+                page_apartments.append(metadata)
+                total_so_far = len(self.apartment_metadata)
 
             # Rate limiting
             await asyncio.sleep(self.delay_apartment)
 
         return page_apartments
 
-    async def run(self) -> List[ApartmentListing]:
+    async def run(self) -> List[ApartmentMetadata]:
         """
-        Run the full scraping process.
+        Run the full scraping process with immediate disk writing.
 
         Returns:
-            List of all processed apartments
+            List of apartment metadata for all processed apartments
         """
         max_pages = self.config.get("max_pages")
         consecutive_empty_pages = 0
@@ -883,7 +1082,7 @@ class EnhancedApartmentScraper:
                     consecutive_empty_pages = 0
                     logger.info(
                         f"Page {page}: {len(page_apartments)} apartments "
-                        f"(Total: {len(self.processed_apartments)})"
+                        f"(Total: {len(self.apartment_metadata)})"
                     )
                 else:
                     consecutive_empty_pages += 1
@@ -899,68 +1098,62 @@ class EnhancedApartmentScraper:
                 await asyncio.sleep(self.delay_page)
                 page += 1
 
-        logger.info(f"Scraping complete: {len(self.processed_apartments)} apartments")
+        logger.info(f"Scraping complete: {len(self.apartment_metadata)} apartments")
 
-        # Sort and save apartments - top N to active, rest to rejected
-        self._save_apartments()
-
-        # Generate summary report (markdown and PDF)
+        # NEW: Generate complete summary with ALL apartments
         if self.generate_summary:
-            self._generate_summary_report()
+            if len(self.apartment_metadata) == 0:
+                logger.warning("No apartments collected - summary will be empty!")
+            else:
+                logger.info(f"Generating summary for {len(self.apartment_metadata)} apartments")
+            self._generate_complete_summary()
 
-            # Generate PDF if enabled
+            # Generate PDF with top N apartments
             if self.config.get("output", {}).get("generate_pdf", True):
                 self._generate_pdf_report()
 
-        return self.processed_apartments
+        return self.apartment_metadata
 
-    def _save_apartments(self) -> None:
-        """Save apartments to files - top N to active, rest to rejected."""
-        # Sort by investment score (highest first)
-        sorted_apartments = sorted(
-            self.processed_apartments,
-            key=lambda a: a.investment_score or 0,
-            reverse=True,
-        )
+    def _generate_complete_summary(self) -> None:
+        """
+        Generate summary.md with ALL apartments (sorted by score).
 
-        # Top N go to active folder (these appear in summary)
-        active_apartments = sorted_apartments[: self.summary_top_n]
-        # Rest go to rejected folder
-        rejected_apartments = sorted_apartments[self.summary_top_n :]
+        Includes:
+        - Statistics section (total count, valid/invalid, averages, city breakdown)
+        - Complete table with ALL apartments
+        - Validation failures marked with warnings
+        """
+        from collections import Counter
 
-        logger.info(
-            f"Saving {len(active_apartments)} to active, "
-            f"{len(rejected_apartments)} to rejected"
-        )
+        logger.info(f"Starting summary generation with {len(self.apartment_metadata)} apartments")
 
-        # Save active apartments
-        for apt in active_apartments:
-            filepath = self.md_generator.generate_apartment_file(apt, rejected=False)
-            self.apartment_files[apt.listing_id] = filepath
-            logger.info(
-                f"Active: {apt.title or apt.listing_id} (Score: {apt.investment_score:.1f})"
-            )
-
-        # Save rejected apartments
-        for apt in rejected_apartments:
-            reason = f"Rang #{sorted_apartments.index(apt) + 1} (unterhalb Top {self.summary_top_n})"
-            filepath = self.md_generator.generate_apartment_file(
-                apt, rejected=True, rejection_reason=reason
-            )
-            self.apartment_files[apt.listing_id] = filepath
-            logger.debug(f"Rejected: {apt.title or apt.listing_id} - {reason}")
-
-    def _generate_summary_report(self) -> None:
-        """Generate summary report of all processed apartments."""
         # Summary goes inside the run folder
-        summary_path = self.run_folder / "summary_report.md"
+        summary_path = self.run_folder / "summary.md"
 
-        # Sort by investment score
-        sorted_apartments = sorted(
-            self.processed_apartments,
-            key=lambda a: a.investment_score or 0,
-            reverse=True,
+        # Sort metadata by score (validation failures at bottom)
+        sorted_metadata = sorted(
+            self.apartment_metadata,
+            key=lambda m: (not m.validation_failed, m.investment_score or -1),
+            reverse=True
         )
+
+        logger.debug(f"Sorted {len(sorted_metadata)} apartments for summary")
+
+        # Calculate statistics
+        total = len(sorted_metadata)
+        valid_count = sum(1 for m in sorted_metadata if not m.validation_failed)
+        failed_count = total - valid_count
+
+        # Average scores (only valid apartments)
+        valid_metadata = [m for m in sorted_metadata if not m.validation_failed and m.investment_score is not None]
+        avg_score = sum(m.investment_score for m in valid_metadata) / valid_count if valid_count > 0 else 0
+
+        # Average yield (only valid apartments)
+        valid_yields = [m.gross_yield for m in valid_metadata if m.gross_yield is not None]
+        avg_yield = sum(valid_yields) / len(valid_yields) if valid_yields else 0
+
+        # City breakdown
+        city_counts = Counter(m.city for m in sorted_metadata if m.city)
 
         # Generate report
         timestamp = self.run_timestamp.strftime("%Y-%m-%d %H:%M:%S")
@@ -971,89 +1164,126 @@ class EnhancedApartmentScraper:
         else:
             location_str = ", ".join(str(aid) for aid in self.area_ids)
 
-        # Calculate active/rejected counts
-        total = len(self.processed_apartments)
-        active_count = min(self.summary_top_n, total)
-        rejected_count = max(0, total - self.summary_top_n)
-
         content = [
-            f"# {HEADERS['investment_summary_report']}",
+            "# Investment Summary - Alle Wohnungen",
             "",
-            f"**{LABELS['generated']}:** {timestamp}",
-            f"**{LABELS['run_id']}:** {self.run_id}",
-            f"**{LABELS['portal']}:** {self.portal}",
-            f"**{LABELS['postal_codes']}:** {location_str}",
-            f"**{LABELS['max_price']}:** EUR {self.config.get('price_max', PHRASES['n/a']):,}",
-            f"**{LABELS['total_scraped']}:** {total}",
-            f"**{LABELS['active']} ({LABELS['top']} {self.summary_top_n}):** {active_count}",
-            f"**{LABELS['rejected']}:** {rejected_count}",
+            f"**Generiert:** {timestamp}",
+            f"**Run ID:** {self.run_id}",
+            f"**Portal:** {self.portal}",
+            f"**Postleitzahlen:** {location_str}",
             "",
-            "---",
+            "## Statistik",
             "",
-            f"## {LABELS['top']} {active_count} {HEADERS['top_opportunities']}",
+            f"- **Gesamt:** {total} Wohnungen",
+            f"- **Valide:** {valid_count}",
+            f"- **Validierung fehlgeschlagen:** {failed_count}",
+            f"- **Durchschnittliche Bewertung:** {avg_score:.1f}/10",
+            f"- **Durchschnittliche Rendite:** {avg_yield:.1f}%",
             "",
-            f"| {TABLE_HEADERS['rank']} | {TABLE_HEADERS['score']} | {TABLE_HEADERS['recommendation']} | {TABLE_HEADERS['price']} | {TABLE_HEADERS['size']} | {TABLE_HEADERS['yield']} | {TABLE_HEADERS['location']} | {TABLE_HEADERS['details']} | {TABLE_HEADERS['source']} |",
-            "|------|-------|----------------|-------|------|-------|----------|---------|--------|",
         ]
 
-        for i, apt in enumerate(sorted_apartments[: self.summary_top_n], 1):
-            price = f"EUR {apt.price:,.0f}" if apt.price else PHRASES["n/a"]
-            size = f"{apt.size_sqm:.0f}m²" if apt.size_sqm else PHRASES["n/a"]
-            yield_str = f"{apt.gross_yield:.1f}%" if apt.gross_yield else PHRASES["n/a"]
+        # City breakdown
+        if city_counts:
+            content.append("**Verteilung nach Städten:**")
+            for city, count in city_counts.most_common():
+                content.append(f"- {city}: {count}")
+            content.append("")
 
-            # Translate recommendation to German
-            recommendation = apt.recommendation or PHRASES["n/a"]
+        # Validation failures section (for debugging)
+        if failed_count > 0:
+            content.extend([
+                "## ⚠️ Validierung fehlgeschlagen",
+                "",
+                f"**{failed_count} Wohnung(en) mit fehlenden kritischen Feldern:**",
+                "",
+                "| Nr. | Grund | Preis | Größe | BK/Monat | Lage | Details |",
+                "|-----|-------|-------|-------|----------|------|---------|",
+            ])
+
+            failed_metadata = [m for m in sorted_metadata if m.validation_failed]
+            for idx, meta in enumerate(failed_metadata, 1):
+                reason = meta.validation_reason or "Unbekannter Validierungsfehler"
+                price_str = f"€{meta.price:,.0f}" if meta.price else "❌ fehlt"
+                size_str = f"{meta.size_sqm:.0f}m²" if meta.size_sqm and meta.size_sqm >= 10 else "❌ fehlt"
+
+                # Try to get betriebskosten from listing if available (not in metadata)
+                bk_str = "n/a"  # Metadata doesn't have this field
+
+                location_parts = []
+                if meta.postal_code:
+                    location_parts.append(meta.postal_code)
+                if meta.city:
+                    location_parts.append(meta.city)
+                location = " ".join(location_parts) if location_parts else "n/a"
+
+                details_link = f"[Details](apartments/{meta.filename})"
+
+                content.append(
+                    f"| {idx} | {reason} | {price_str} | {size_str} | {bk_str} | {location} | {details_link} |"
+                )
+
+            content.append("")
+
+        content.extend([
+            "## Alle Wohnungen (sortiert nach Bewertung)",
+            "",
+            f"| Rang | Status | Bewertung | Empfehlung | Preis | Größe | Rendite | Lage | Details |",
+            "|------|--------|-----------|------------|-------|-------|---------|------|---------|",
+        ])
+
+        for rank, meta in enumerate(sorted_metadata, 1):
+            # Status indicator
+            if meta.validation_failed:
+                status = "⚠️"
+                score_str = "n/v"
+            else:
+                status = "✅"
+                score_str = f"{meta.investment_score:.1f}" if meta.investment_score is not None else "n/a"
+
+            recommendation = meta.recommendation or "n/a"
             if recommendation in RECOMMENDATIONS:
                 recommendation = RECOMMENDATIONS[recommendation]
 
-            # Build location string with fallback to area_id mapping
-            location = self._build_location_string(apt)
+            price_str = f"€{meta.price:,.0f}" if meta.price else "n/a"
+            size_str = f"{meta.size_sqm:.0f}m²" if meta.size_sqm else "n/a"
+            yield_str = f"{meta.gross_yield:.1f}%" if meta.gross_yield else "n/a"
 
-            # Get local file link (relative to summary report in same folder)
-            local_file = self.apartment_files.get(apt.listing_id, "")
-            if local_file:
-                filename = Path(local_file).name
-                details_link = f"[{LABELS['details']}](active/{filename})"
-            else:
-                details_link = "-"
+            # Location string
+            location_parts = []
+            if meta.postal_code:
+                location_parts.append(meta.postal_code)
+            if meta.city:
+                location_parts.append(meta.city)
+            location = " ".join(location_parts) if location_parts else "n/a"
+
+            # Details link to apartments/ subfolder
+            details_link = f"[Details](apartments/{meta.filename})"
 
             content.append(
-                f"| {i} | {apt.investment_score:.1f} | {recommendation} | "
-                f"{price} | {size} | {yield_str} | {location} | "
-                f"{details_link} | [{LABELS['source']}]({apt.source_url}) |"
+                f"| {rank} | {status} | {score_str} | {recommendation} | {price_str} | "
+                f"{size_str} | {yield_str} | {location} | {details_link} |"
             )
 
-        content.append("")
-        content.append("---")
-        content.append("")
-        content.append(f"*{PHRASES['generated_by']}*")
+        content.extend(["", "---", "", "*Generiert mit noessi-crawl*"])
 
-        # Write report
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(summary_path, "w", encoding="utf-8") as f:
+        # Write summary
+        with open(summary_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(content))
 
-        logger.info(f"Summary report saved: {summary_path}")
+        logger.info(f"Complete summary saved: {summary_path} ({len(sorted_metadata)} apartments, {failed_count} failed)")
 
     def _generate_pdf_report(self) -> None:
-        """Generate PDF report of all processed apartments."""
+        """Generate PDF report with top N apartments (from TopNTracker)."""
+        # Get sorted top N apartments (full objects from heap)
+        top_apartments = self.top_n_tracker.get_sorted_apartments()
+
+        if not top_apartments:
+            logger.warning("No valid apartments for PDF report")
+            return
+
         # PDF goes inside the run folder
         pdf_filename = self.config.get("output", {}).get("pdf_filename", "investment_summary.pdf")
         pdf_path = self.run_folder / pdf_filename
-
-        # Sort by investment score (same as markdown)
-        sorted_apartments = sorted(
-            self.processed_apartments,
-            key=lambda a: a.investment_score or 0,
-            reverse=True,
-        )
-
-        # Only include top N apartments (same as summary report)
-        top_apartments = sorted_apartments[: self.summary_top_n]
-
-        if not top_apartments:
-            logger.warning("No apartments to include in PDF report")
-            return
 
         try:
             # Initialize PDF generator
@@ -1141,8 +1371,6 @@ async def load_config() -> Dict[str, Any]:
             raise ValueError(
                 "Missing required field 'postal_codes' or 'area_ids' for willhaben portal"
             )
-        if "price_max" not in config:
-            raise ValueError("Missing required field 'price_max' for willhaben portal")
 
     # Ensure output folder exists
     output_folder = Path(__file__).parent / config.get("output_folder", "output")
