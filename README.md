@@ -9,17 +9,20 @@ A Python-based web crawler for extracting apartment listings from willhaben.at (
 - Configurable search parameters (location area IDs, price range)
 - Ad filtering (excludes promoted listings)
 - **Robust data extraction** with validation:
-  - Multi-strategy: JSON-LD → Regex → Optional LLM
+  - Multi-strategy: JSON-LD → Regex → Optional LLM (improved)
+  - **NEW: Enhanced LLM extraction** with 5-strategy JSON parsing, HTML preprocessing, 50KB limit
+  - **NEW: Diagnostic logging** for raw LLM responses (configurable)
   - Strict validation (size ≥ 10 m²) prevents extraction errors
   - Negative lookbehind patterns reject partial numbers
-  - Diagnostic logging for troubleshooting
+  - Relaxed LLM validation thresholds (€10+ betriebskosten, €1+ reparaturrücklage)
 - **Investment Analysis**:
   - Yield calculations (gross/net)
   - Cash flow projections
   - Investment scoring (0-10 scale)
   - Recommendations (STRONG BUY to AVOID)
+  - **NEW: AI-generated investment summaries** (100-150 words, German, optional)
 - **Individual markdown files** per apartment with YAML frontmatter
-- **PDF investment reports** with professional styling and clickable navigation
+- **PDF investment reports** with professional styling, clickable navigation, and AI summaries
 - **Timestamped run folders** for each scrape session
 - Top N apartments saved to `active/`, rest to `rejected/`
 - Summary report (markdown + PDF) with links to apartment files
@@ -54,41 +57,59 @@ Edit `config.json` to customize your search:
 ```json
 {
   "portal": "willhaben",
-  "area_ids": [201, 202, 117223],
-  "price_max": 200000,
+  "postal_codes": [
+    "1010",
+    "1020",
+    "9020",
+    "9061"
+  ],
   "output_folder": "output",
-  "max_pages": null,
+  "max_pages": 1,
 
   "extraction": {
-    "use_llm": false,
+    "use_llm": true,
     "llm_model": "qwen3:8b",
-    "fallback_to_regex": true
+    "fallback_to_regex": true,
+    "diagnostic_mode": false,
+    "diagnostic_output": "diagnostics",
+    "diagnostic_logging": true,
+    "html_max_chars": 50000
   },
 
   "filters": {
     "min_yield": null,
-    "max_price": null,
+    "max_price": 150000,
     "min_size_sqm": null,
     "max_size_sqm": null,
     "excluded_districts": [],
+    "max_betriebskosten_per_sqm": null,
+    "exclude_renovierung_needed": false,
+    "exclude_poor_energy": false,
     "min_investment_score": null
   },
 
   "analysis": {
     "mortgage_rate": 3.5,
-    "down_payment_percent": 30,
+    "down_payment_percent": 10,
     "transaction_cost_percent": 9,
+    "loan_term_years": 30,
     "estimated_rent_per_sqm": {
+      "default": 12.0,
       "vienna_inner": 16.0,
-      "vienna_outer": 13.0
-    }
+      "vienna_outer": 13.0,
+      "graz": 11.0,
+      "linz": 10.5,
+      "salzburg": 14.0
+    },
+    "generate_llm_summary": true,
+    "llm_summary_model": "qwen3:8b",
+    "llm_summary_max_words": 150
   },
 
   "output": {
     "format": "individual_markdown",
-    "include_rejected": false,
     "generate_summary": true,
-    "summary_top_n": 20,
+    "pdf_top_n": 20,
     "generate_pdf": true,
     "pdf_filename": "investment_summary.pdf"
   },
@@ -107,8 +128,7 @@ Edit `config.json` to customize your search:
 | Field | Type | Description |
 |-------|------|-------------|
 | `portal` | string | Portal name (currently only "willhaben" supported) |
-| `area_ids` | array | List of postal code area IDs to search |
-| `price_max` | number | Maximum price threshold in euros |
+| `postal_codes` | array | List of Austrian postal codes to search (e.g., ["1010", "9020"]) |
 | `output_folder` | string | Output directory (default: "output") |
 | `max_pages` | number/null | Max pages to scrape (null = unlimited) |
 
@@ -119,6 +139,24 @@ Edit `config.json` to customize your search:
 | `use_llm` | boolean | Enable Ollama LLM extraction for missing fields |
 | `llm_model` | string | Ollama model to use (e.g., "qwen3:8b") |
 | `fallback_to_regex` | boolean | Use regex if LLM fails |
+| `diagnostic_mode` | boolean | Save diagnostic HTML files for troubleshooting |
+| `diagnostic_output` | string | Directory for diagnostic files (default: "diagnostics") |
+| `diagnostic_logging` | boolean | **NEW:** Enable detailed logging of raw LLM responses |
+| `html_max_chars` | number | **NEW:** Max HTML chars sent to LLM (default: 50000, was 20000) |
+
+#### Filter Settings
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `min_yield` | number/null | Minimum gross yield % threshold |
+| `max_price` | number/null | Maximum price filter in euros |
+| `min_size_sqm` | number/null | Minimum apartment size in m² |
+| `max_size_sqm` | number/null | Maximum apartment size in m² |
+| `excluded_districts` | array | Vienna districts to exclude (e.g., [1, 2, 3]) |
+| `max_betriebskosten_per_sqm` | number/null | Max operating costs per m² |
+| `exclude_renovierung_needed` | boolean | Exclude apartments needing renovation |
+| `exclude_poor_energy` | boolean | Exclude poor energy ratings |
+| `min_investment_score` | number/null | Minimum investment score threshold |
 
 #### Analysis Settings
 
@@ -126,24 +164,34 @@ Edit `config.json` to customize your search:
 |-------|------|-------------|
 | `mortgage_rate` | number | Annual mortgage rate % for cash flow calculation |
 | `down_payment_percent` | number | Down payment % for mortgage calculation |
-| `transaction_cost_percent` | number | Total transaction costs % |
-| `estimated_rent_per_sqm` | object | Rent estimates by region |
+| `transaction_cost_percent` | number | Total transaction costs % (default: 9%) |
+| `loan_term_years` | number | Mortgage loan term in years |
+| `estimated_rent_per_sqm` | object | Rent estimates by region (€/m²/month) |
+| `generate_llm_summary` | boolean | **NEW:** Generate AI investment summaries for PDF |
+| `llm_summary_model` | string | **NEW:** Model for summaries (default: "qwen3:8b") |
+| `llm_summary_max_words` | number | **NEW:** Max words per summary (default: 150) |
 
 #### Output Settings
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `summary_top_n` | number | Number of top apartments in active folder (default: 20) |
+| `format` | string | Output format ("individual_markdown") |
 | `generate_summary` | boolean | Generate summary reports (markdown + PDF) |
+| `pdf_top_n` | number | Number of top apartments in active folder (default: 20) |
 | `generate_pdf` | boolean | Generate PDF investment report (default: true) |
 | `pdf_filename` | string | PDF filename (default: "investment_summary.pdf") |
 
-### Finding Area IDs
+### Using Postal Codes
 
-Area IDs correspond to postal code regions on willhaben.at:
-1. Visit willhaben.at's apartment search
-2. Select desired locations in the filter
-3. Check the URL for `areaId=` parameters
+The scraper now uses Austrian postal codes directly (no need to find area IDs):
+
+**Supported Cities:**
+- **Vienna**: 1010-1230 (all 23 districts)
+- **Graz**: 8010-8075
+- **Klagenfurt**: 9020-9073
+- **Villach**: 9500-9523
+
+Simply add the postal codes you want to search in the `postal_codes` array in config.json. The scraper automatically translates them to willhaben area IDs.
 
 ## Usage
 
@@ -222,9 +270,19 @@ The `investment_summary.pdf` provides a professional report with:
   - Two-column layout (financial analysis + property details)
   - Color-coded investment scores
   - Positive factors and risk factors
+  - **NEW: AI-generated investment summary** (if enabled, appears after risk factors)
   - Clickable source URLs
 - **Professional styling**: Navy/gray color scheme suitable for investors
 - **Internal navigation**: Click apartment rows in summary to jump to detail pages
+
+#### LLM-Generated Summaries
+
+When `generate_llm_summary: true` in config, each apartment gets a 100-150 word German investment analysis that:
+- Synthesizes all data into investment insights
+- Balances opportunities and risks
+- Provides clear investment perspective
+- Appears in PDF after positive/risk factors section
+- Generated using Ollama (requires Ollama running locally)
 
 ## Investment Scoring
 
@@ -264,7 +322,8 @@ noessi-crawl/
 │   ├── pdf_generator.py       # PDF report generation
 │   └── translations.py        # German translations
 ├── llm/                       # Optional LLM integration
-│   ├── extractor.py           # Ollama extraction
+│   ├── extractor.py           # Ollama extraction (improved)
+│   ├── summarizer.py          # AI summary generation (NEW)
 │   └── analyzer.py            # Investment analysis
 ├── output/                    # Generated files (gitignored)
 │   └── apartments_YYYY-MM-DD-HHMMSS/
@@ -286,9 +345,18 @@ noessi-crawl/
 3. **Critical field validation**:
    - Strict minimums: size ≥ 10 m², price > 0, costs > 0
    - Diagnostic logging shows extracted values for debugging
-4. **LLM extraction** (optional): Ollama for missing fields
+4. **LLM extraction** (optional, improved): Ollama for missing fields
+   - **NEW: Enhanced HTML preprocessing** (strips scripts/styles, 50KB limit)
+   - **NEW: 5-strategy JSON parsing** (handles malformed responses)
+   - **NEW: Diagnostic logging** (see raw LLM responses when enabled)
+   - **NEW: Relaxed validation** (€10+ betriebskosten, €1+ reparaturrücklage)
    - Robust timeout handling (10s connect, 120s read, 180s hard timeout)
    - Graceful failures - continues without LLM data if unavailable
+5. **LLM summary generation** (optional, new): AI investment analysis
+   - Generated after investment scoring completes
+   - 100-150 word German summaries
+   - Appears in PDF reports after positive/risk factors
+   - 60s timeout, graceful degradation if Ollama unavailable
 
 ### Austrian-Specific Features
 
@@ -379,15 +447,34 @@ uv run python tests/test_star_icon.py   # Ad filtering (star icon detection)
 - Check logs - will show "Checking Ollama availability..." and timeout after 10s if unreachable
 - Hard timeout (180s) prevents indefinite hangs
 
-**LLM extraction fails:**
+**LLM extraction fails or returns no data:**
 - Verify Ollama is installed and running: `ollama list`
 - Pull model if missing: `ollama pull qwen3:8b`
+- **Enable diagnostic logging**: Set `diagnostic_logging: true` in config.json
+- Check logs for "LLM raw response" to see what the model actually returned
+- Try different parsing strategies (automatically attempted)
 - Scraper continues gracefully without LLM data on failures
+
+**LLM extraction improves after update:**
+- **HTML preprocessing** now removes bloat (scripts/styles) - more useful data sent to LLM
+- **50KB limit** (was 20KB) - captures more complete property specifications
+- **5 parsing strategies** handle malformed JSON better
+- **Relaxed validation** accepts realistic low-cost apartments (€10+ instead of €20+)
+
+**LLM summary generation issues:**
+- Check `generate_llm_summary: true` in config.json under `analysis` section
+- Verify Ollama is running (same as extraction)
+- Summaries only generated for **valid apartments** (passed critical field validation)
+- Check logs: "LLM summary generated (X chars)" indicates success
+- Timeout is 90s (shorter than extraction) - check logs for timeout warnings
+- PDFs render correctly with or without summaries
 
 **Monitoring Progress:**
 - Logs show detailed progress: "Processing apartment (Total so far: X)"
-- Diagnostic logs: "Regex extracted size_sqm: ..." for critical fields
-- LLM operations logged: availability checks, extraction attempts, success/failures
+- Diagnostic logs (when enabled): "LLM raw response", "JSON parsed via strategy X"
+- Regex extraction: "Regex extracted size_sqm: ..." for critical fields
+- LLM operations: availability checks, extraction attempts, success/failures, summary generation
+- Summary generation: "LLM summary generated (X chars, Y words)"
 
 ## Limitations
 

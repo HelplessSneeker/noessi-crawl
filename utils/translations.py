@@ -17,6 +17,7 @@ HEADERS: Dict[str, str] = {
     "regulatory_notes": "Regulatorische Hinweise",
     "next_steps": "Nächste Schritte",
     "top_opportunities": "Top Investitionsmöglichkeiten",
+    "llm_summary_section": "KI-gestützte Zusammenfassung",
 }
 
 # Field labels

@@ -621,6 +621,20 @@ class PDFGenerator:
                 self.pdf.set_x(15)  # Set absolute x position for indent
                 self.pdf.multi_cell(185, 4, f"• {factor}")
 
+        # LLM Summary section (if available)
+        if apt.llm_summary:
+            self.pdf.ln(4)
+
+            # Section header
+            self.pdf.set_font("NotoSans", "B", 9)
+            self.pdf.set_text_color(*self.NAVY)
+            self.pdf.cell(0, 5, HEADERS["llm_summary_section"], ln=True)
+
+            # Summary text
+            self.pdf.set_font("NotoSans", "", 8)
+            self.pdf.set_text_color(*self.GRAY)
+            self.pdf.multi_cell(185, 4, apt.llm_summary)
+
         self.pdf.set_text_color(0, 0, 0)
 
     def _draw_apartment_footer(self, apt: ApartmentListing):

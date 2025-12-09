@@ -5,13 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 **noessi-crawl** is a Python-based web crawler for extracting apartment listings from willhaben.at (Austrian real estate portal). It features:
-- Multi-strategy data extraction (JSON-LD, regex, optional LLM via Ollama)
+- Multi-strategy data extraction (JSON-LD, regex, enhanced LLM via Ollama)
+- **NEW:** Improved LLM extraction (5-strategy JSON parsing, HTML preprocessing, diagnostic logging)
+- **NEW:** AI-generated investment summaries (100-150 words, German, optional)
 - Investment analysis with scoring (0-10 scale) and buy recommendations
 - Individual markdown files with YAML frontmatter for each listing
-- Professional PDF reports with clickable navigation and two-column layout
+- Professional PDF reports with clickable navigation, two-column layout, and AI summaries
 - Timestamped run folders with top N apartments in `active/`, rest in `rejected/`
 - German-language output (field labels, headers, recommendations)
-- Summary reports (markdown + PDF) with investment rankings and file links
 - Austrian-specific features (Vienna districts, MRG detection, postal code mapping)
 
 ## Development Environment
@@ -71,7 +72,8 @@ noessi-crawl/
 │   └── translations.py            # German translations (HEADERS, LABELS, RECOMMENDATIONS)
 ├── llm/                           # LLM integration (optional)
 │   ├── __init__.py
-│   ├── extractor.py               # OllamaExtractor (structured data extraction)
+│   ├── extractor.py               # OllamaExtractor (enhanced: 5-strategy parsing, HTML preprocessing)
+│   ├── summarizer.py              # ApartmentSummarizer (NEW: AI investment summaries)
 │   └── analyzer.py                # InvestmentAnalyzer (scoring, yield, cash flow)
 ├── output/                        # Generated files (gitignored)
 │   └── apartments_YYYY-MM-DD-HHMMSS/
@@ -114,15 +116,19 @@ Edit `config.json` to customize behavior. Key sections:
 "extraction": {
   "use_llm": true,                 // Enable Ollama LLM for missing fields
   "llm_model": "qwen3:8b",         // Ollama model name
-  "fallback_to_regex": false,      // Use regex if LLM fails
-  "cache_extracted": false         // Cache extraction results (not implemented)
+  "fallback_to_regex": true,       // Use regex if LLM fails
+  "diagnostic_mode": false,        // Save diagnostic HTML files
+  "diagnostic_output": "diagnostics", // Diagnostic files directory
+  "diagnostic_logging": true,      // NEW: Log raw LLM responses
+  "html_max_chars": 50000          // NEW: Max HTML chars to LLM (was 20KB)
 }
 ```
 
-Multi-strategy extraction order:
-1. JSON-LD structured data (primary, most reliable)
-2. Regex patterns for German terminology (fallback)
-3. Ollama LLM for missing fields (if enabled)
+**NEW Improvements:**
+- **HTML preprocessing**: Strips scripts/styles, preserves JSON-LD, 50KB limit
+- **5-strategy JSON parsing**: Handles malformed JSON (missing quotes, trailing commas, regex fallback)
+- **Diagnostic logging**: See raw LLM responses for troubleshooting
+- **Relaxed validation**: Accepts betriebskosten ≥€10 (was €20), reparaturrücklage ≥€1 (was €5)
 
 ### Filters
 
@@ -147,9 +153,9 @@ Multi-strategy extraction order:
 ```json
 "analysis": {
   "mortgage_rate": 3.5,            // Annual interest rate %
-  "down_payment_percent": 30,      // Down payment %
+  "down_payment_percent": 10,      // Down payment %
   "transaction_cost_percent": 9,   // Total transaction costs %
-  "loan_term_years": 25,           // Mortgage term
+  "loan_term_years": 30,           // Mortgage term
   "estimated_rent_per_sqm": {      // Rent estimates by location
     "default": 12.0,
     "vienna_inner": 16.0,
@@ -157,18 +163,27 @@ Multi-strategy extraction order:
     "graz": 11.0,
     "linz": 10.5,
     "salzburg": 14.0
-  }
+  },
+  "generate_llm_summary": true,    // NEW: Generate AI summaries
+  "llm_summary_model": "qwen3:8b", // NEW: Model for summaries
+  "llm_summary_max_words": 150     // NEW: Max words per summary
 }
 ```
+
+**NEW: AI Investment Summaries**
+- Generated after investment analysis completes
+- 100-150 word German summaries synthesizing all data
+- Appears in PDF after positive/risk factors section
+- Only for valid apartments (passed critical field validation)
+- 90s timeout, graceful degradation if Ollama unavailable
 
 ### Output Settings
 
 ```json
 "output": {
   "format": "individual_markdown",  // Format type (only markdown supported)
-  "include_rejected": false,        // Include rejected folder
   "generate_summary": true,         // Generate summary reports (MD + PDF)
-  "summary_top_n": 20,              // Number of apartments in active folder
+  "pdf_top_n": 20,                  // Number of apartments in active folder
   "generate_pdf": true,             // Generate PDF report (default: true)
   "pdf_filename": "investment_summary.pdf"  // PDF filename
 }
@@ -228,17 +243,21 @@ The `EnhancedApartmentScraper` class orchestrates the entire process:
    - Parsed by `AustrianAddressParser`: street, house number, PLZ, city, district
    - Vienna district extraction from postal codes (1030 → district 3)
 
-4. **LLM Extraction** (optional, `OllamaExtractor`):
-   - Only called if `use_llm: true` and missing critical fields
-   - Sends HTML + existing data to Ollama with structured prompt
-   - Fills missing fields only (doesn't overwrite existing data)
-   - **Timeout protection**: 10s connect timeout, 120s read timeout, 180s hard timeout wrapper
-   - **Comprehensive logging**: Tracks availability checks, extraction attempts, success/failures
-   - **Graceful failures**: Continues without LLM data if Ollama unavailable or timeout occurs
+4. **LLM Extraction** (optional, enhanced `OllamaExtractor`):
+   - **NEW: HTML preprocessing**: Strips scripts/styles, preserves JSON-LD, 50KB limit (was 20KB)
+   - **NEW: 5-strategy JSON parsing**: Direct → markdown block → object → repair → regex fallback
+   - **NEW: Diagnostic logging**: Logs raw responses when `diagnostic_logging: true`
+   - **NEW: Relaxed validation**: €10+ betriebskosten (was €20+), €1+ reparaturrücklage (was €5+)
+   - Fills missing fields only, doesn't overwrite existing data
+   - Timeout: 10s connect, 120s read, 180s hard limit
+   - Graceful failures: Continues without LLM data if unavailable
 
-5. **Location Enrichment** (`_enrich_location_from_area_ids()`):
-   - If postal_code/city missing, infers from configured area_ids
-   - Uses `AREA_ID_TO_LOCATION` mapping in constants.py
+5. **LLM Summary Generation** (optional, new `ApartmentSummarizer`):
+   - Generated after investment analysis completes
+   - 100-150 word German summaries synthesizing all data
+   - Uses apartment metrics + positive/risk factors
+   - Timeout: 90s (shorter than extraction)
+   - Appears in PDF after positive/risk factors section
 
 6. **Critical Field Validation** (`_validate_critical_fields()`):
    - Validates after ALL extraction strategies complete (JSON-LD, DOM, Regex, LLM)
@@ -312,6 +331,7 @@ The `PDFGenerator` class creates professional investment reports synchronized wi
 - Financial: Price, yield, cash flow, operating costs, recommendation
 - Property: Size, rooms, condition, features, location
 - Investment analysis: Positive factors and risk factors
+- **NEW: AI summary** (if enabled): Appears after risk factors with German investment insights
 - Footer with clickable source URL
 
 **Technical Details**:
@@ -350,33 +370,16 @@ The `PDFGenerator` class creates professional investment reports synchronized wi
 - Zimmer (rooms), Stock (floor), Aufzug (elevator), Balkon (balcony)
 - Heizungsart (heating type), HWB (heating demand), fGEE (energy efficiency)
 
-### Ad Filtering
+### Ad Filtering & Output
 
-The scraper filters out promoted/ad listings by checking for star icon path:
-```python
-star_icon_path = "m12 4 2.09 4.25a1.52 1.52 0 0 0 1.14.82l4.64.64-3.42 3.32"
-```
-Real listings have this icon; promoted ads don't.
+- Filters promoted ads by checking star icon SVG path
+- Creates timestamped folders: `apartments_YYYY-MM-DD-HHMMSS` (self-contained runs)
 
-### Timestamped Run Folders
+### Pagination & Rate Limiting
 
-Each scrape creates a unique folder: `apartments_YYYY-MM-DD-HHMMSS`
-- Allows tracking multiple scraping sessions
-- Each run is self-contained with active/rejected/summary
-- Summary report references relative file paths within same folder
-
-### Rate Limiting
-
-Polite crawling with configurable delays:
-- 0.5s between apartment detail requests (default)
-- 1.0s between pagination pages (default)
-- Prevents server overload and potential IP blocking
-
-### Pagination Strategy
-
-- Continues until empty pages detected (consecutive_empty_pages >= 2)
-- Or until `max_pages` limit reached (if configured)
-- Automatically stops when no more listings found
+- Continues until empty pages (consecutive_empty_pages >= 2) or `max_pages` limit
+- Rate limits: 0.5s between apartments, 1.0s between pages (configurable)
+- Prevents server overload and IP blocking
 
 ## ApartmentListing Data Model
 
@@ -408,6 +411,7 @@ The `ApartmentListing` dataclass (models/apartment.py) contains ~65 fields:
 **Investment Metrics** (10+ fields):
 - estimated_rent, monthly_cash_flow, gross_yield, net_yield
 - investment_score, recommendation, positive_factors, risk_factors
+- **NEW:** llm_summary, llm_summary_generated_at
 
 **Metadata**:
 - raw_json_ld, description, tags
@@ -485,13 +489,11 @@ Edit `utils/translations.py`:
 
 ## Known Limitations
 
-- Only supports willhaben.at portal (hardcoded URL patterns)
-- Depends on willhaben's HTML structure (breaks if site changes)
+- Only supports willhaben.at (hardcoded URL patterns, depends on HTML structure)
 - No authentication (public listings only)
-- LLM extraction requires local Ollama installation
-- Filters in config are not actively enforced (ranking-based instead)
-- No duplicate checking across multiple runs
-- Summary report only includes top N (rest in rejected folder)
+- LLM features require local Ollama installation
+- Filters not actively enforced (apartments ranked by score instead)
+- No duplicate checking across runs
 
 ## Troubleshooting
 
@@ -510,14 +512,21 @@ Edit `utils/translations.py`:
 
 **"Failed to fetch"**: Playwright not installed (`playwright install`) or network issues
 
-**LLM extraction hangs**:
-- Check Ollama is running: `curl http://localhost:11434/api/tags`
-- Logs show "Checking Ollama availability..." and timeout after 10s if unreachable
-- Hard timeout wrapper prevents indefinite hangs (180s max)
-
-**LLM extraction fails**:
-- Verify Ollama is running and model pulled: `ollama list`
+**LLM extraction issues**:
+- Check Ollama: `curl http://localhost:11434/api/tags`
+- **NEW:** Enable `diagnostic_logging: true` to see raw LLM responses
+- **NEW:** Check logs for "JSON parsed via strategy X" to see which parsing worked
+- **NEW:** HTML preprocessing now strips bloat (50KB limit vs 20KB before)
+- Verify model pulled: `ollama list` then `ollama pull qwen3:8b`
+- Hard timeout: 180s prevents indefinite hangs
 - Scraper continues gracefully without LLM data on failures
+
+**LLM summary generation**:
+- Requires `generate_llm_summary: true` in analysis section
+- Only generated for valid apartments (passed critical field validation)
+- Check logs: "LLM summary generated (X chars)" indicates success
+- Timeout: 90s (shorter than extraction)
+- PDFs render correctly with or without summaries
 
 **Wrong postal codes**: Update PLZ_TO_AREA_ID in models/constants.py
 **Missing translations**: Add to utils/translations.py

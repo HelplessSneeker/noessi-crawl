@@ -92,6 +92,10 @@ class ApartmentListing:
     risk_factors: List[str] = field(default_factory=list)
     analysis_notes: Optional[str] = None
 
+    # LLM-generated summary (optional)
+    llm_summary: Optional[str] = None
+    llm_summary_generated_at: Optional[datetime] = None
+
     # Raw data for debugging
     raw_json_ld: Optional[Dict[str, Any]] = None
     raw_html_excerpt: Optional[str] = None

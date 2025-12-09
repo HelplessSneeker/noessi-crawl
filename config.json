@@ -11,15 +11,16 @@
     "9523"
   ],
   "output_folder": "output",
-  "max_pages": 1,
+  "max_pages": null,
 
   "extraction": {
-    "use_llm": false,
+    "use_llm": true,
     "llm_model": "qwen3:8b",
     "fallback_to_regex": true,
-    "cache_extracted": false,
     "diagnostic_mode": false,
-    "diagnostic_output": "diagnostics"
+    "diagnostic_output": "diagnostics",
+    "diagnostic_logging": true,
+    "html_max_chars": 50000
   },
 
   "filters": {
@@ -36,9 +37,9 @@
 
   "analysis": {
     "mortgage_rate": 3.5,
-    "down_payment_percent": 30,
+    "down_payment_percent": 10,
     "transaction_cost_percent": 9,
-    "loan_term_years": 25,
+    "loan_term_years": 30,
     "estimated_rent_per_sqm": {
       "default": 12.0,
       "vienna_inner": 16.0,
@@ -46,7 +47,10 @@
       "graz": 11.0,
       "linz": 10.5,
       "salzburg": 14.0
-    }
+    },
+    "generate_llm_summary": true,
+    "llm_summary_model": "qwen3:8b",
+    "llm_summary_max_words": 150
   },
 
   "output": {

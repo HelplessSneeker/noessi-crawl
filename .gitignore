@@ -11,6 +11,8 @@ wheels/
 
 # Output folder
 output/
+output_test/
 
 # Diagnostic data (may contain personal information)
 diagnostics/
+diagnostics_test/

@@ -12,6 +12,7 @@ from crawl4ai import AsyncWebCrawler
 
 from llm.analyzer import InvestmentAnalyzer
 from llm.extractor import OllamaExtractor
+from llm.summarizer import ApartmentSummarizer
 from models.apartment import ApartmentListing
 from models.constants import AREA_ID_TO_LOCATION, PLZ_TO_AREA_ID
 from models.metadata import ApartmentMetadata
@@ -58,13 +59,31 @@ class EnhancedApartmentScraper:
 
         if self.use_llm:
             llm_model = extraction_config.get("llm_model", "qwen3:8b")
-            self.llm_extractor = OllamaExtractor(model=llm_model)
+            diagnostic_logging = extraction_config.get("diagnostic_logging", False)
+            html_max_chars = extraction_config.get("html_max_chars", 50000)
+            self.llm_extractor = OllamaExtractor(
+                model=llm_model,
+                diagnostic_logging=diagnostic_logging,
+                html_max_chars=html_max_chars
+            )
         else:
             self.llm_extractor = None
 
         # Investment analyzer
         analysis_config = config.get("analysis", {})
         self.analyzer = InvestmentAnalyzer(analysis_config)
+
+        # LLM summarizer (optional)
+        self.generate_llm_summary = analysis_config.get("generate_llm_summary", False)
+        if self.generate_llm_summary:
+            summary_model = analysis_config.get("llm_summary_model", "qwen3:8b")
+            summary_max_words = analysis_config.get("llm_summary_max_words", 150)
+            self.summarizer = ApartmentSummarizer(
+                model=summary_model,
+                max_words=summary_max_words
+            )
+        else:
+            self.summarizer = None
 
         # Markdown generator with timestamped folder
         output_folder = config.get("output_folder", "output")
@@ -967,6 +986,22 @@ class EnhancedApartmentScraper:
 
             # Perform investment analysis (even if validation failed - gives partial metrics)
             apartment = self.analyzer.analyze_apartment(apartment)
+
+            # Generate LLM summary if enabled (only for valid apartments)
+            if is_valid and self.generate_llm_summary and self.summarizer:
+                try:
+                    summary = await asyncio.wait_for(
+                        self.summarizer.generate_summary(apartment),
+                        timeout=90.0,
+                    )
+                    if summary:
+                        apartment.llm_summary = summary
+                        apartment.llm_summary_generated_at = datetime.now()
+                        logger.info(f"LLM summary generated ({len(summary)} chars)")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Summary generation timed out for {listing_id}")
+                except Exception as e:
+                    logger.warning(f"Summary generation failed for {listing_id}: {e}")
 
             # NEW: Write immediately to disk (ALL apartments, including validation failures)
             filepath = self._write_apartment_immediately(

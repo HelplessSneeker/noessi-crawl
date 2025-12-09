@@ -51,6 +51,8 @@ class OllamaExtractor:
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
+        diagnostic_logging: bool = False,
+        html_max_chars: int = 50000,
     ):
         """
         Initialize the Ollama extractor.
@@ -59,10 +61,14 @@ class OllamaExtractor:
             model: Ollama model name to use
             base_url: Ollama API base URL
             timeout: Request timeout in seconds
+            diagnostic_logging: Enable diagnostic logging of raw LLM responses
+            html_max_chars: Maximum HTML characters to send to LLM
         """
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.diagnostic_logging = diagnostic_logging
+        self.html_max_chars = html_max_chars
         self._available: Optional[bool] = None
 
     async def check_availability(self) -> bool:
@@ -132,11 +138,8 @@ class OllamaExtractor:
 
         logger.info(f"Starting LLM extraction using model {self.model}")
 
-        # Truncate HTML to avoid token limits (increased from 15k to 20k for better coverage)
-        max_chars = 20000
-        if len(html_content) > max_chars:
-            html_content = html_content[:max_chars] + "\n... [truncated]"
-            logger.debug(f"HTML truncated from {len(html_content)} to {max_chars} chars")
+        # Preprocess HTML (remove scripts, collapse whitespace, truncate)
+        html_content = self._preprocess_html(html_content)
 
         # Build prompt
         prompt = self._build_extraction_prompt(html_content, existing_data)
@@ -284,34 +287,158 @@ HTML content:
 Return only the JSON object, no explanation:"""
 
     def _parse_json_response(self, text: str) -> Optional[Dict[str, Any]]:
-        """Parse JSON from LLM response, handling common issues."""
+        """
+        Parse JSON from LLM response with enhanced error recovery.
+
+        Strategies (in order):
+        1. Direct JSON parse
+        2. Extract from markdown code block
+        3. Extract JSON object from text
+        4. Attempt repair of common malformed JSON
+        5. Extract key-value pairs with regex fallback
+        """
         if not text:
             return None
 
-        # Try direct parse
+        # Log raw response in diagnostic mode
+        if self.diagnostic_logging:
+            logger.debug(f"LLM raw response ({len(text)} chars): {text[:500]}...")
+
+        # Strategy 1: Direct parse
         try:
-            return json.loads(text)
+            result = json.loads(text)
+            if self.diagnostic_logging:
+                logger.debug("JSON parsed directly (strategy 1)")
+            return result
         except json.JSONDecodeError:
             pass
 
-        # Try to extract JSON from markdown code block
+        # Strategy 2: Extract from markdown code block
         json_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
         if json_match:
             try:
-                return json.loads(json_match.group(1))
+                result = json.loads(json_match.group(1))
+                if self.diagnostic_logging:
+                    logger.debug("JSON parsed from code block (strategy 2)")
+                return result
             except json.JSONDecodeError:
                 pass
 
-        # Try to find JSON object in text
+        # Strategy 3: Extract JSON object from text
         json_match = re.search(r"\{[\s\S]*\}", text)
         if json_match:
             try:
-                return json.loads(json_match.group(0))
+                result = json.loads(json_match.group(0))
+                if self.diagnostic_logging:
+                    logger.debug("JSON parsed from object extraction (strategy 3)")
+                return result
             except json.JSONDecodeError:
-                pass
+                extracted = json_match.group(0)
 
-        logger.warning(f"Could not parse JSON from LLM response: {text[:200]}")
+                # Strategy 4: Attempt repairs
+                if self.diagnostic_logging:
+                    logger.debug("Attempting JSON repair (strategy 4)...")
+
+                # Fix missing quotes around keys
+                repaired = re.sub(r'(\{|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1"\2":', extracted)
+                # Remove trailing commas
+                repaired = re.sub(r',(\s*[}\]])', r'\1', repaired)
+                # Replace single quotes with double quotes
+                repaired = repaired.replace("'", '"')
+
+                try:
+                    result = json.loads(repaired)
+                    if self.diagnostic_logging:
+                        logger.debug("JSON repaired successfully (strategy 4)")
+                    return result
+                except json.JSONDecodeError:
+                    pass
+
+        # Strategy 5: Regex fallback for key-value pairs
+        if self.diagnostic_logging:
+            logger.debug("Attempting regex key-value extraction (strategy 5)...")
+
+        result = {}
+        patterns = [
+            (r'"([^"]+)"\s*:\s*"([^"]*)"', str),
+            (r'"([^"]+)"\s*:\s*(\d+\.?\d*)', float),
+            (r'"([^"]+)"\s*:\s*(true|false)', lambda x: x.lower() == 'true'),
+            (r'"([^"]+)"\s*:\s*null', lambda x: None),
+        ]
+
+        for pattern, converter in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                key = match.group(1)
+                value_str = match.group(2) if len(match.groups()) > 1 else None
+                try:
+                    if converter == str:
+                        result[key] = value_str
+                    elif value_str:
+                        result[key] = converter(value_str)
+                    else:
+                        result[key] = None
+                except (ValueError, TypeError):
+                    continue
+
+        if result:
+            if self.diagnostic_logging:
+                logger.debug(f"Extracted {len(result)} fields via regex (strategy 5)")
+            return result
+
+        logger.warning(f"Could not parse JSON from LLM response. Response: {text[:200]}...")
+        if self.diagnostic_logging:
+            logger.debug(f"Full failed response: {text}")
+
         return None
+
+    def _preprocess_html(self, html: str) -> str:
+        """
+        Preprocess HTML before sending to LLM.
+
+        - Removes script tags (except application/ld+json)
+        - Strips excessive whitespace
+        - Truncates to configured limit
+
+        Returns:
+            Cleaned HTML string
+        """
+        # First, protect JSON-LD scripts with placeholders
+        json_ld_scripts = []
+        def save_json_ld(match):
+            json_ld_scripts.append(match.group(0))
+            return f"___JSON_LD_PLACEHOLDER_{len(json_ld_scripts)-1}___"
+
+        html = re.sub(
+            r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>.*?</script>',
+            save_json_ld,
+            html,
+            flags=re.DOTALL | re.IGNORECASE
+        )
+
+        # Remove all other script tags
+        html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+
+        # Restore JSON-LD scripts
+        for idx, script in enumerate(json_ld_scripts):
+            html = html.replace(f"___JSON_LD_PLACEHOLDER_{idx}___", script)
+
+        # Remove style tags
+        html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+
+        # Collapse excessive whitespace
+        html = re.sub(r'\s+', ' ', html)
+        html = re.sub(r'>\s+<', '><', html)
+
+        # Truncate to limit
+        if len(html) > self.html_max_chars:
+            if self.diagnostic_logging:
+                logger.debug(
+                    f"HTML truncated: {len(html)} → {self.html_max_chars} chars "
+                    f"({(self.html_max_chars/len(html)*100):.1f}% retained)"
+                )
+            return html[:self.html_max_chars] + "\n... [truncated]"
+
+        return html
 
     def _validate_and_clean(
         self,
@@ -334,8 +461,8 @@ Return only the JSON object, no explanation:"""
             "floor": (int, lambda x: -2 <= x < 100),
             "year_built": (int, lambda x: 1800 <= x <= 2030),
             "hwb_value": (float, lambda x: 0 < x < 500),
-            "betriebskosten_monthly": (float, lambda x: 20 <= x < 2000),  # FIXED: Min €20/month (was: 0 < x)
-            "reparaturrucklage": (float, lambda x: 5 <= x < 500),  # FIXED: Min €5/month (was: 0 < x)
+            "betriebskosten_monthly": (float, lambda x: 10 <= x < 2000),  # Relaxed: Min €10/month
+            "reparaturrucklage": (float, lambda x: 1 <= x < 500),  # Relaxed: Min €1/month
         }
 
         boolean_fields = [
@@ -371,10 +498,10 @@ Return only the JSON object, no explanation:"""
                         rejected_count += 1
                         # Enhanced logging with specific reasons
                         reason = "out of range"
-                        if field == "betriebskosten_monthly" and value < 20:
-                            reason = f"too low (€{value} < €20 minimum, likely placeholder)"
-                        elif field == "reparaturrucklage" and value < 5:
-                            reason = f"too low (€{value} < €5 minimum, likely placeholder)"
+                        if field == "betriebskosten_monthly" and value < 10:
+                            reason = f"suspiciously low (€{value} < €10, verify manually)"
+                        elif field == "reparaturrucklage" and value < 1:
+                            reason = f"suspiciously low (€{value} < €1, verify manually)"
                         rejected_fields.append(f"{field}={extracted[field]} ({reason})")
                         logger.warning(f"Rejected {field}={extracted[field]} ({reason})")
                 except (ValueError, TypeError) as e:
