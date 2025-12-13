@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import signal
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -122,6 +123,31 @@ class EnhancedApartmentScraper:
 
         # Translate postal codes to area_ids for willhaben
         self.area_ids = self._translate_postal_codes_to_area_ids()
+
+        # Graceful interrupt handling
+        self.interrupted = False
+
+    def _handle_interrupt(self, signum, frame):
+        """
+        Handle interrupt signal (Ctrl+C) gracefully.
+
+        Sets the interrupted flag to stop extraction but allows summary generation.
+        """
+        if not self.interrupted:
+            logger.warning("")
+            logger.warning("=" * 80)
+            logger.warning("⚠️  INTERRUPT SIGNAL RECEIVED (Ctrl+C)")
+            logger.warning("=" * 80)
+            logger.warning("Stopping extraction gracefully...")
+            logger.warning(f"Apartments collected so far: {len(self.apartment_metadata)}")
+            logger.warning("Summary report will be generated with collected apartments.")
+            logger.warning("=" * 80)
+            logger.warning("")
+            self.interrupted = True
+        else:
+            # Second interrupt - force exit
+            logger.error("Second interrupt received - forcing exit!")
+            raise KeyboardInterrupt
 
     def _translate_postal_codes_to_area_ids(self) -> List[int]:
         """Translate postal codes from config to willhaben area_ids."""
@@ -1216,6 +1242,11 @@ class EnhancedApartmentScraper:
         page_apartments = []
         total_so_far = len(self.apartment_metadata)
         for i, listing in enumerate(listings, 1):
+            # Check for interrupt before processing next apartment
+            if self.interrupted:
+                logger.warning(f"Interrupt detected - stopping page {page} after {i-1}/{len(listings)} apartments")
+                break
+
             listing_url = listing["url"]
             logger.info(
                 f"  [{i}/{len(listings)}] Processing apartment (Total so far: {total_so_far}): {listing_url}"
@@ -1235,47 +1266,71 @@ class EnhancedApartmentScraper:
         """
         Run the full scraping process with immediate disk writing.
 
+        Supports graceful interrupt (Ctrl+C): stops extraction but generates summary.
+
         Returns:
             List of apartment metadata for all processed apartments
         """
+        # Register interrupt handler for graceful shutdown
+        signal.signal(signal.SIGINT, self._handle_interrupt)
+
         max_pages = self.config.get("max_pages")
         consecutive_empty_pages = 0
         max_consecutive_empty = 2
         page = 1
 
         logger.info(f"Starting scrape (max_pages: {max_pages or 'unlimited'})")
+        logger.info("Press Ctrl+C to stop extraction and generate summary with collected apartments")
 
-        async with AsyncWebCrawler(headless=True, verbose=False) as crawler:
-            while True:
-                # Check page limit
-                if max_pages and page > max_pages:
-                    logger.info(f"Reached max page limit ({max_pages})")
-                    break
-
-                # Scrape page
-                page_apartments = await self.scrape_page(crawler, page)
-
-                if page_apartments:
-                    consecutive_empty_pages = 0
-                    logger.info(
-                        f"Page {page}: {len(page_apartments)} apartments "
-                        f"(Total: {len(self.apartment_metadata)})"
-                    )
-                else:
-                    consecutive_empty_pages += 1
-                    logger.info(
-                        f"Page {page}: Empty ({consecutive_empty_pages}/{max_consecutive_empty})"
-                    )
-
-                    if consecutive_empty_pages >= max_consecutive_empty:
-                        logger.info("Stopping: consecutive empty pages limit reached")
+        try:
+            async with AsyncWebCrawler(headless=True, verbose=False) as crawler:
+                while True:
+                    # Check for interrupt signal
+                    if self.interrupted:
+                        logger.warning("Extraction stopped by user interrupt")
                         break
 
-                # Rate limiting between pages
-                await asyncio.sleep(self.delay_page)
-                page += 1
+                    # Check page limit
+                    if max_pages and page > max_pages:
+                        logger.info(f"Reached max page limit ({max_pages})")
+                        break
 
-        logger.info(f"Scraping complete: {len(self.apartment_metadata)} apartments")
+                    # Scrape page
+                    page_apartments = await self.scrape_page(crawler, page)
+
+                    if page_apartments:
+                        consecutive_empty_pages = 0
+                        logger.info(
+                            f"Page {page}: {len(page_apartments)} apartments "
+                            f"(Total: {len(self.apartment_metadata)})"
+                        )
+                    else:
+                        consecutive_empty_pages += 1
+                        logger.info(
+                            f"Page {page}: Empty ({consecutive_empty_pages}/{max_consecutive_empty})"
+                        )
+
+                        if consecutive_empty_pages >= max_consecutive_empty:
+                            logger.info("Stopping: consecutive empty pages limit reached")
+                            break
+
+                    # Rate limiting between pages
+                    await asyncio.sleep(self.delay_page)
+                    page += 1
+
+        except Exception as e:
+            # Handle browser cleanup errors gracefully (common after interrupt)
+            if "Browser.close" in str(e) or "Connection closed" in str(e):
+                logger.warning("Browser connection closed during cleanup (expected after interrupt)")
+            else:
+                # Re-raise unexpected errors
+                raise
+
+        # Log completion status
+        if self.interrupted:
+            logger.info(f"Extraction interrupted: {len(self.apartment_metadata)} apartments collected")
+        else:
+            logger.info(f"Scraping complete: {len(self.apartment_metadata)} apartments")
 
         # NEW: Generate complete summary with ALL apartments
         if self.generate_summary:
@@ -1572,6 +1627,9 @@ async def main():
             f"Scraping complete! Found {len(apartments)} investment opportunities."
         )
 
+    except KeyboardInterrupt:
+        # Graceful shutdown - already handled by scraper.run()
+        logger.info("Shutdown complete")
     except FileNotFoundError:
         logger.error("config.json not found")
     except Exception as e:

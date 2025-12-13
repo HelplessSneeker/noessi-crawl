@@ -46,6 +46,12 @@ ollama pull qwen2.5:14b
 uv run python main.py
 ```
 
+**Graceful Interrupt**: Press `Ctrl+C` to stop extraction early. The scraper will:
+- Stop processing new apartments immediately
+- Generate summary with all apartments collected so far
+- Create markdown and PDF reports with partial data
+- Press `Ctrl+C` twice to force exit without summary
+
 Output: `output/apartments_YYYY-MM-DD-HHMMSS/`
 - `active/` - Top N apartments by investment score
 - `rejected/` - All other apartments
