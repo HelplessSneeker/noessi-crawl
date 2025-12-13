@@ -110,25 +110,26 @@ Edit `config.json` to customize behavior. Key sections:
 
 **Important**: Use `postal_codes` (preferred) instead of legacy `area_ids`. The code translates postal codes to willhaben area_ids using `PLZ_TO_AREA_ID` mapping in `models/constants.py`.
 
-### Extraction Settings
+### LLM Settings
 
 ```json
-"extraction": {
-  "use_llm": true,                 // Enable Ollama LLM for missing fields
-  "llm_model": "qwen3:8b",         // Ollama model name
-  "fallback_to_regex": true,       // Use regex if LLM fails
-  "diagnostic_mode": false,        // Save diagnostic HTML files
-  "diagnostic_output": "diagnostics", // Diagnostic files directory
-  "diagnostic_logging": true,      // NEW: Log raw LLM responses
-  "html_max_chars": 50000          // NEW: Max HTML chars to LLM (was 20KB)
+"llm_settings": {
+  "enabled": false,                // Enable Ollama LLM for extraction and summaries
+  "model": "qwen3:8b",             // Ollama model name (used for both extraction and summaries)
+  "html_max_chars": 50000,         // Max HTML chars to LLM (prevents token overflow)
+  "generate_summary": false,       // Generate AI-powered investment summaries
+  "summary_max_words": 150,        // Max words per summary (100-150 recommended)
+  "diagnostics_enabled": false     // Enable diagnostic logging and data saving
 }
 ```
 
-**NEW Improvements:**
+**LLM Features:**
+- **Unified model**: Single model for both data extraction and summary generation
 - **HTML preprocessing**: Strips scripts/styles, preserves JSON-LD, 50KB limit
 - **5-strategy JSON parsing**: Handles malformed JSON (missing quotes, trailing commas, regex fallback)
-- **Diagnostic logging**: See raw LLM responses for troubleshooting
-- **Relaxed validation**: Accepts betriebskosten ≥€10 (was €20), reparaturrücklage ≥€1 (was €5)
+- **Diagnostic mode**: When enabled, logs raw LLM responses and saves extraction data to `diagnostics/` folder
+- **AI summaries**: 100-150 word German investment summaries synthesizing all data (appears in PDF reports)
+- **Graceful degradation**: Scraper continues without LLM data if Ollama unavailable
 
 ### Filters
 
@@ -163,25 +164,16 @@ Edit `config.json` to customize behavior. Key sections:
     "graz": 11.0,
     "linz": 10.5,
     "salzburg": 14.0
-  },
-  "generate_llm_summary": true,    // NEW: Generate AI summaries
-  "llm_summary_model": "qwen3:8b", // NEW: Model for summaries
-  "llm_summary_max_words": 150     // NEW: Max words per summary
+  }
 }
 ```
 
-**NEW: AI Investment Summaries**
-- Generated after investment analysis completes
-- 100-150 word German summaries synthesizing all data
-- Appears in PDF after positive/risk factors section
-- Only for valid apartments (passed critical field validation)
-- 90s timeout, graceful degradation if Ollama unavailable
+**Note**: LLM-powered investment summaries are now configured in the `llm_settings` section.
 
 ### Output Settings
 
 ```json
 "output": {
-  "format": "individual_markdown",  // Format type (only markdown supported)
   "generate_summary": true,         // Generate summary reports (MD + PDF)
   "pdf_top_n": 20,                  // Number of apartments in active folder
   "generate_pdf": true,             // Generate PDF report (default: true)
@@ -244,10 +236,10 @@ The `EnhancedApartmentScraper` class orchestrates the entire process:
    - Vienna district extraction from postal codes (1030 → district 3)
 
 4. **LLM Extraction** (optional, enhanced `OllamaExtractor`):
-   - **NEW: HTML preprocessing**: Strips scripts/styles, preserves JSON-LD, 50KB limit (was 20KB)
-   - **NEW: 5-strategy JSON parsing**: Direct → markdown block → object → repair → regex fallback
-   - **NEW: Diagnostic logging**: Logs raw responses when `diagnostic_logging: true`
-   - **NEW: Relaxed validation**: €10+ betriebskosten (was €20+), €1+ reparaturrücklage (was €5+)
+   - **HTML preprocessing**: Strips scripts/styles, preserves JSON-LD, 50KB limit (was 20KB)
+   - **5-strategy JSON parsing**: Direct → markdown block → object → repair → regex fallback
+   - **Diagnostic logging**: Logs raw responses when `llm_settings.diagnostics_enabled: true`
+   - **Relaxed validation**: €10+ betriebskosten (was €20+), €1+ reparaturrücklage (was €5+)
    - Fills missing fields only, doesn't overwrite existing data
    - Timeout: 10s connect, 120s read, 180s hard limit
    - Graceful failures: Continues without LLM data if unavailable
@@ -514,15 +506,15 @@ Edit `utils/translations.py`:
 
 **LLM extraction issues**:
 - Check Ollama: `curl http://localhost:11434/api/tags`
-- **NEW:** Enable `diagnostic_logging: true` to see raw LLM responses
-- **NEW:** Check logs for "JSON parsed via strategy X" to see which parsing worked
-- **NEW:** HTML preprocessing now strips bloat (50KB limit vs 20KB before)
+- Enable `llm_settings.diagnostics_enabled: true` to see raw LLM responses
+- Check logs for "JSON parsed via strategy X" to see which parsing worked
+- HTML preprocessing now strips bloat (50KB limit vs 20KB before)
 - Verify model pulled: `ollama list` then `ollama pull qwen3:8b`
 - Hard timeout: 180s prevents indefinite hangs
 - Scraper continues gracefully without LLM data on failures
 
 **LLM summary generation**:
-- Requires `generate_llm_summary: true` in analysis section
+- Requires `llm_settings.generate_summary: true`
 - Only generated for valid apartments (passed critical field validation)
 - Check logs: "LLM summary generated (X chars)" indicates success
 - Timeout: 90s (shorter than extraction)

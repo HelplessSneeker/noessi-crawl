@@ -16,9 +16,10 @@ class ApartmentSummarizer:
 
     DEFAULT_MODEL = "qwen3:8b"
     DEFAULT_BASE_URL = "http://localhost:11434"
-    DEFAULT_TIMEOUT = 60.0
+    DEFAULT_TIMEOUT = 120.0  # INCREASED from 60s to 120s
     MAX_RETRIES = 2
     DEFAULT_MAX_WORDS = 150
+    DEFAULT_MIN_WORDS = 80  # NEW: Configurable minimum
 
     def __init__(
         self,
@@ -26,6 +27,7 @@ class ApartmentSummarizer:
         base_url: str = DEFAULT_BASE_URL,
         timeout: float = DEFAULT_TIMEOUT,
         max_words: int = DEFAULT_MAX_WORDS,
+        min_words: int = DEFAULT_MIN_WORDS,  # NEW parameter
     ):
         """
         Initialize the apartment summarizer.
@@ -35,11 +37,13 @@ class ApartmentSummarizer:
             base_url: Ollama API base URL
             timeout: Request timeout in seconds
             max_words: Maximum words for summary
+            min_words: Minimum words for summary (default: 80)
         """
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.max_words = max_words
+        self.min_words = min_words  # NEW: Store min words
         self._available: Optional[bool] = None
 
     async def _check_ollama_availability(self) -> bool:
@@ -114,7 +118,7 @@ class ApartmentSummarizer:
             try:
                 logger.debug(f"Summary generation attempt {attempt + 1}/{self.MAX_RETRIES}")
                 async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.timeout, connect=10.0, pool=5.0)
+                    timeout=httpx.Timeout(self.timeout, connect=15.0, pool=5.0)  # INCREASED connect from 10s to 15s
                 ) as client:
                     response = await client.post(
                         f"{self.base_url}/api/generate",
@@ -276,11 +280,14 @@ Zusammenfassung:"""
         summary = re.sub(r'\s+', ' ', summary)
         summary = summary.strip()
 
-        # Check minimum length (at least 50 words)
+        # Check word count (keep short summaries, just log warning)
         word_count = len(summary.split())
-        if word_count < 50:
-            logger.debug(f"Summary too short ({word_count} words < 50 minimum)")
-            return None
+        if word_count < self.min_words:
+            logger.debug(
+                f"Summary short ({word_count} words < {self.min_words} minimum), "
+                f"but keeping it (target: {self.max_words} words)"
+            )
+            # CHANGED: Keep short summaries instead of rejecting them
 
         # Truncate if too long
         if word_count > self.max_words:

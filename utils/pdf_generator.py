@@ -600,7 +600,7 @@ class PDFGenerator:
         if apt.positive_factors:
             self.pdf.set_font("NotoSans", "B", 9)
             self.pdf.set_text_color(40, 167, 69)  # Green
-            self.pdf.cell(0, 5, "✓ Positive Faktoren:", ln=True)
+            self.pdf.cell(0, 5, "+ Positive Faktoren:", ln=True)
 
             self.pdf.set_font("NotoSans", "", 8)
             self.pdf.set_text_color(0, 0, 0)
@@ -613,7 +613,7 @@ class PDFGenerator:
             self.pdf.ln(2)
             self.pdf.set_font("NotoSans", "B", 9)
             self.pdf.set_text_color(220, 53, 69)  # Red
-            self.pdf.cell(0, 5, "⚠ Risikofaktoren:", ln=True)
+            self.pdf.cell(0, 5, "! Risikofaktoren:", ln=True)
 
             self.pdf.set_font("NotoSans", "", 8)
             self.pdf.set_text_color(0, 0, 0)

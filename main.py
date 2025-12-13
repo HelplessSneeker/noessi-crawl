@@ -30,6 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Suppress font subsetting logs from PDF generation
+logging.getLogger('fontTools.subset').setLevel(logging.WARNING)
+
 
 class EnhancedApartmentScraper:
     """Enhanced apartment scraper with investment analysis capabilities."""
@@ -53,14 +56,13 @@ class EnhancedApartmentScraper:
         self.address_parser = AustrianAddressParser()
 
         # LLM extractor (optional)
-        extraction_config = config.get("extraction", {})
-        self.use_llm = extraction_config.get("use_llm", False)
-        self.fallback_to_regex = extraction_config.get("fallback_to_regex", True)
+        llm_config = config.get("llm_settings", {})
+        self.use_llm = llm_config.get("enabled", False)
 
         if self.use_llm:
-            llm_model = extraction_config.get("llm_model", "qwen3:8b")
-            diagnostic_logging = extraction_config.get("diagnostic_logging", False)
-            html_max_chars = extraction_config.get("html_max_chars", 50000)
+            llm_model = llm_config.get("model", "qwen3:8b")
+            diagnostic_logging = llm_config.get("diagnostics_enabled", False)
+            html_max_chars = llm_config.get("html_max_chars", 50000)
             self.llm_extractor = OllamaExtractor(
                 model=llm_model,
                 diagnostic_logging=diagnostic_logging,
@@ -74,13 +76,17 @@ class EnhancedApartmentScraper:
         self.analyzer = InvestmentAnalyzer(analysis_config)
 
         # LLM summarizer (optional)
-        self.generate_llm_summary = analysis_config.get("generate_llm_summary", False)
+        self.generate_llm_summary = llm_config.get("generate_summary", False)
         if self.generate_llm_summary:
-            summary_model = analysis_config.get("llm_summary_model", "qwen3:8b")
-            summary_max_words = analysis_config.get("llm_summary_max_words", 150)
+            llm_model = llm_config.get("model", "qwen3:8b")
+            summary_max_words = llm_config.get("summary_max_words", 150)
+            summary_timeout = llm_config.get("summary_timeout", 120)  # NEW: Get timeout from config
+            summary_min_words = llm_config.get("summary_min_words", 80)  # NEW: Get min words from config
             self.summarizer = ApartmentSummarizer(
-                model=summary_model,
-                max_words=summary_max_words
+                model=llm_model,
+                max_words=summary_max_words,
+                timeout=summary_timeout,  # NEW: Pass timeout
+                min_words=summary_min_words  # NEW: Pass min words
             )
         else:
             self.summarizer = None
@@ -249,25 +255,59 @@ class EnhancedApartmentScraper:
             parsed_address = self.address_parser.parse_address(address_text)
             self._apply_address_data(apartment, parsed_address)
 
-        # Strategy 3: LLM extraction (if enabled and missing critical fields)
+        # Strategy 3: LLM extraction (if enabled and quality-based triggers)
+        llm_data = None  # Initialize to prevent UnboundLocalError in diagnostics
         if self.use_llm and self.llm_extractor:
+            # Get trigger configuration
+            trigger_mode = self.config.get("llm_settings", {}).get("trigger_mode", "conservative")
+            quality_check = self.config.get("llm_settings", {}).get("quality_check_enabled", True)
+
+            should_run_llm = False
+            trigger_reason = []
+
+            # Check 1: Critical fields missing (original logic)
             missing_critical = not apartment.price or not apartment.size_sqm
-            if missing_critical or self._has_missing_fields(apartment):
+            if missing_critical:
+                should_run_llm = True
+                trigger_reason.append("missing_critical_fields")
+
+            # Check 2: Quality issues (NEW - aggressive mode)
+            if quality_check and not missing_critical:
+                quality_issues = self._detect_quality_issues(apartment)
+                if quality_issues:
+                    should_run_llm = True
+                    trigger_reason.extend(quality_issues)
+
+            # Check 3: Missing important fields
+            if trigger_mode in ["aggressive", "always"]:
+                if self._has_missing_fields(apartment):
+                    should_run_llm = True
+                    if "missing_optional_fields" not in trigger_reason:
+                        trigger_reason.append("missing_optional_fields")
+
+            # Check 4: Always run (for testing)
+            if trigger_mode == "always":
+                should_run_llm = True
+                if "always_mode" not in trigger_reason:
+                    trigger_reason.append("always_mode")
+
+            if should_run_llm:
                 # Count non-None fields before LLM extraction
                 import time
                 fields_before = sum(1 for k, v in apartment.to_dict().items() if v not in (None, ""))
                 start_time = time.time()
 
                 logger.info(
-                    f"Starting LLM extraction for listing {listing_id} "
-                    f"(missing critical: {missing_critical}, fields before: {fields_before})"
+                    f"LLM extraction triggered for {listing_id}: {', '.join(trigger_reason)} "
+                    f"(fields before: {fields_before})"
                 )
                 existing_data = apartment.to_dict()
                 try:
                     # Add hard timeout wrapper to prevent indefinite hangs
+                    extraction_timeout = self.config.get("llm_settings", {}).get("extraction_timeout", 180)
                     llm_data = await asyncio.wait_for(
                         self.llm_extractor.extract_structured_data(html, existing_data),
-                        timeout=180.0,  # 3 minutes max for LLM extraction
+                        timeout=extraction_timeout,
                     )
                     logger.info(f"LLM extraction completed for listing {listing_id}")
                     self._apply_llm_data(apartment, llm_data)
@@ -290,14 +330,14 @@ class EnhancedApartmentScraper:
 
                 except asyncio.TimeoutError:
                     logger.error(
-                        f"LLM extraction timed out after 180s for listing {listing_id}, "
+                        f"LLM extraction timed out after {extraction_timeout}s for listing {listing_id}, "
                         f"continuing without LLM data"
                     )
                 except Exception as e:
                     logger.error(f"LLM extraction failed for listing {listing_id}: {e}")
             else:
                 logger.debug(
-                    f"Skipping LLM extraction for {listing_id} - all fields present"
+                    f"Skipping LLM extraction for {listing_id} - no quality issues detected"
                 )
 
         # Extract title from markdown/HTML if not set
@@ -311,7 +351,7 @@ class EnhancedApartmentScraper:
         # with validation_failed flag for manual review
 
         # Diagnostic mode: save extraction data for debugging
-        if self.config.get("extraction", {}).get("diagnostic_mode", False):
+        if self.config.get("llm_settings", {}).get("diagnostics_enabled", False):
             self._save_diagnostic_data(
                 listing_id=listing_id,
                 url=url,
@@ -372,12 +412,14 @@ class EnhancedApartmentScraper:
         if allow_betriebskosten_overwrite and "betriebskosten_monthly" in data:
             new_value = data["betriebskosten_monthly"]
             current_value = apartment.betriebskosten_monthly
-            if current_value and current_value != new_value:
-                logger.info(
-                    f"Regex overwriting betriebskosten: €{current_value} → €{new_value} "
-                    f"(regex patterns are more authoritative)"
-                )
-            apartment.betriebskosten_monthly = new_value
+            # Only overwrite if regex found a value (don't overwrite with None)
+            if new_value is not None:
+                if current_value and current_value != new_value:
+                    logger.info(
+                        f"Regex overwriting betriebskosten: €{current_value} → €{new_value} "
+                        f"(regex patterns are more authoritative)"
+                    )
+                apartment.betriebskosten_monthly = new_value
 
         # Apply other fields
         field_mappings = [
@@ -458,145 +500,206 @@ class EnhancedApartmentScraper:
         # Check price
         if not apartment.price or apartment.price <= 0:
             missing_fields.append("price")
+            logger.warning(f"Validation failed for {apartment.listing_id}: price={apartment.price}")
 
         # Check size - must be at least 10 m² (reject extraction errors)
         if not apartment.size_sqm or apartment.size_sqm < 10.0:
             missing_fields.append("size_sqm")
+            logger.warning(
+                f"Validation failed for {apartment.listing_id}: size_sqm={apartment.size_sqm} "
+                f"(minimum 10 m² required)"
+            )
 
         # Check operating costs
         if not apartment.betriebskosten_monthly or apartment.betriebskosten_monthly <= 0:
             missing_fields.append("betriebskosten_monthly")
+            logger.warning(
+                f"Validation failed for {apartment.listing_id}: "
+                f"betriebskosten_monthly={apartment.betriebskosten_monthly}"
+            )
 
         if missing_fields:
             reason = f"Missing critical fields: {', '.join(missing_fields)}"
+            logger.warning(f"VALIDATION FAILED for {apartment.listing_id}: {reason}")
             return (False, reason)
 
+        logger.info(f"Validation passed for {apartment.listing_id}")
         return (True, None)
+
+    def _detect_quality_issues(self, apartment: ApartmentListing) -> List[str]:
+        """
+        Detect suspicious/invalid extracted values that should trigger LLM re-extraction.
+
+        Returns:
+            List of quality issue descriptions (empty if no issues)
+        """
+        issues = []
+
+        # Financial field quality checks (CRITICAL)
+        if apartment.betriebskosten_monthly:
+            if apartment.betriebskosten_monthly < 30:
+                issues.append(f"betriebskosten_suspicious(€{apartment.betriebskosten_monthly}<€30)")
+            if apartment.size_sqm and apartment.betriebskosten_monthly / apartment.size_sqm < 0.5:
+                issues.append(f"betriebskosten_per_sqm_too_low(€{apartment.betriebskosten_monthly/apartment.size_sqm:.2f}/m²)")
+        else:
+            issues.append("betriebskosten_missing")
+
+        if apartment.reparaturrucklage and apartment.reparaturrucklage < 10:
+            issues.append(f"reparaturrucklage_suspicious(€{apartment.reparaturrucklage}<€10)")
+
+        # Bedroom/bathroom sanity checks
+        if apartment.bedrooms == 0 and apartment.rooms and apartment.rooms >= 1.5:
+            issues.append(f"bedrooms_zero_but_rooms={apartment.rooms}")
+
+        if apartment.bathrooms == 0 and apartment.size_sqm and apartment.size_sqm > 25:
+            issues.append("bathrooms_zero_unlikely")
+
+        # Floor validation
+        if apartment.floor and apartment.floor > 20:
+            issues.append(f"floor_unlikely({apartment.floor}>20)")
+
+        # Year built sanity
+        if apartment.year_built and (apartment.year_built < 1700 or apartment.year_built > 2030):
+            issues.append(f"year_built_invalid({apartment.year_built})")
+
+        # HWB value sanity (typical: 20-300 kWh/m²a)
+        if apartment.hwb_value:
+            if apartment.hwb_value > 1000:
+                issues.append(f"hwb_value_unrealistic({apartment.hwb_value}>1000)")
+            if apartment.hwb_value < 5 and apartment.hwb_value > 0:
+                issues.append(f"hwb_value_too_low({apartment.hwb_value}<5)")
+
+        return issues
 
     def _apply_llm_data(
         self, apartment: ApartmentListing, data: Dict[str, Any]
     ) -> None:
-        """Apply LLM-extracted data to apartment (only missing fields)."""
-        # Only fill in missing fields
-        if not apartment.title and data.get("title"):
-            apartment.title = data["title"]
-        if not apartment.price and data.get("price"):
-            apartment.price = data["price"]
-        if not apartment.size_sqm and data.get("size_sqm"):
-            apartment.size_sqm = data["size_sqm"]
-        if not apartment.rooms and data.get("rooms"):
-            apartment.rooms = data["rooms"]
-        if not apartment.bedrooms and data.get("bedrooms"):
-            apartment.bedrooms = data["bedrooms"]
-        if not apartment.bathrooms and data.get("bathrooms"):
-            apartment.bathrooms = data["bathrooms"]
-        if apartment.floor is None and data.get("floor") is not None:
-            apartment.floor = data["floor"]
-        if not apartment.year_built and data.get("year_built"):
-            apartment.year_built = data["year_built"]
-        if not apartment.condition and data.get("condition"):
-            apartment.condition = data["condition"]
-        if not apartment.building_type and data.get("building_type"):
-            apartment.building_type = data["building_type"]
-        if not apartment.energy_rating and data.get("energy_rating"):
-            apartment.energy_rating = data["energy_rating"]
-        if not apartment.heating_type and data.get("heating_type"):
-            apartment.heating_type = data["heating_type"]
+        """
+        Apply LLM-extracted data to apartment with smart overwrite logic.
 
-        # Financial fields (CRITICAL for investment analysis)
-        # Allow LLM to overwrite suspicious values (e.g., betriebskosten < €10 is likely wrong)
+        Strategy:
+        - Fill missing fields (always)
+        - Replace suspicious/invalid values (quality-based)
+        - Log all replacements for debugging
+        """
         fields_added = []
+        fields_replaced = []
+        fields_kept = []
 
-        # Betriebskosten: Apply if empty OR if existing value is suspiciously low
-        if data.get("betriebskosten_monthly"):
-            llm_value = data["betriebskosten_monthly"]
-            current_value = apartment.betriebskosten_monthly
+        # Helper function for overwrite decisions
+        def should_overwrite(field_name: str, current_value: Any, llm_value: Any) -> tuple[bool, str]:
+            """Returns (should_overwrite, reason)"""
+            if current_value is None or current_value == "":
+                return (True, "missing")
 
-            # Smarter overwrite conditions
-            should_overwrite = (
-                not current_value or  # Empty
-                current_value < 20 or  # Too low (placeholder) - increased from 10
-                (llm_value > 20 and llm_value > current_value * 5)  # LLM found much higher realistic value
-            )
+            # Financial fields with quality checks
+            if field_name == "betriebskosten_monthly":
+                if current_value < 30:  # Unrealistically low
+                    return (True, f"too_low(€{current_value}<€30)")
+                if llm_value and llm_value > 30 and llm_value > current_value * 5:
+                    return (True, f"llm_much_higher(€{current_value}→€{llm_value})")
+                return (False, f"reasonable(€{current_value})")
 
-            if should_overwrite:
-                if current_value and current_value != llm_value:
-                    fields_added.append(
-                        f"betriebskosten_monthly=€{llm_value} (replaced suspicious €{current_value})"
-                    )
-                    logger.info(
-                        f"Replaced betriebskosten_monthly: €{current_value} → €{llm_value} "
-                        f"(reason: {'empty' if not current_value else 'too low' if current_value < 20 else 'much higher value found'})"
-                    )
+            if field_name == "reparaturrucklage":
+                if current_value < 10:
+                    return (True, f"too_low(€{current_value}<€10)")
+                if llm_value and llm_value > 10 and llm_value > current_value * 3:
+                    return (True, f"llm_much_higher(€{current_value}→€{llm_value})")
+                return (False, f"reasonable(€{current_value})")
+
+            # Bedroom/bathroom zero checks
+            if field_name == "bedrooms":
+                if current_value == 0 and llm_value and llm_value > 0:
+                    return (True, "zero_replaced")
+                return (False, f"keep({current_value})")
+
+            if field_name == "bathrooms":
+                if current_value == 0 and llm_value and llm_value > 0:
+                    return (True, "zero_replaced")
+                return (False, f"keep({current_value})")
+
+            # Floor validation
+            if field_name == "floor":
+                if current_value > 20 or current_value < -2:
+                    return (True, f"unlikely({current_value})")
+                return (False, f"keep({current_value})")
+
+            # Year built validation
+            if field_name == "year_built":
+                if current_value < 1700 or current_value > 2030:
+                    return (True, f"invalid({current_value})")
+                return (False, f"keep({current_value})")
+
+            # HWB value validation
+            if field_name == "hwb_value":
+                if current_value > 1000 or (current_value < 5 and current_value > 0):
+                    return (True, f"unrealistic({current_value})")
+                return (False, f"keep({current_value})")
+
+            return (False, "exists")
+
+        # Apply each field with smart overwrite logic
+        field_mappings = {
+            "title": "title",
+            "price": "price",
+            "size_sqm": "size_sqm",
+            "rooms": "rooms",
+            "bedrooms": "bedrooms",
+            "bathrooms": "bathrooms",
+            "floor": "floor",
+            "year_built": "year_built",
+            "condition": "condition",
+            "building_type": "building_type",
+            "energy_rating": "energy_rating",
+            "heating_type": "heating_type",
+            "betriebskosten_monthly": "betriebskosten_monthly",
+            "reparaturrucklage": "reparaturrucklage",
+            "hwb_value": "hwb_value",
+        }
+
+        for llm_key, apt_field in field_mappings.items():
+            if llm_key not in data or data[llm_key] is None:
+                continue
+
+            llm_value = data[llm_key]
+            current_value = getattr(apartment, apt_field)
+
+            should_replace, reason = should_overwrite(apt_field, current_value, llm_value)
+
+            if should_replace:
+                setattr(apartment, apt_field, llm_value)
+                if current_value is not None and current_value != "":
+                    fields_replaced.append(f"{apt_field}={current_value}→{llm_value} ({reason})")
                 else:
-                    fields_added.append(f"betriebskosten_monthly=€{llm_value}")
-                apartment.betriebskosten_monthly = llm_value
+                    fields_added.append(f"{apt_field}={llm_value}")
             else:
-                logger.debug(
-                    f"Kept existing betriebskosten_monthly=€{current_value} "
-                    f"(LLM suggested €{llm_value}, but current value seems reasonable)"
-                )
+                fields_kept.append(f"{apt_field}={current_value} ({reason})")
 
-        # Reparaturrücklage: Apply if empty OR if existing value is suspiciously low
-        if data.get("reparaturrucklage"):
-            llm_value = data["reparaturrucklage"]
-            current_value = apartment.reparaturrucklage
+        # Boolean features (always fill if missing)
+        boolean_fields = {
+            "elevator": "elevator",
+            "balcony": "balcony",
+            "terrace": "terrace",
+            "garden": "garden",
+            "parking": "parking",
+            "cellar": "cellar",
+            "commission_free": "commission_free",
+        }
 
-            # Smarter overwrite conditions
-            should_overwrite = (
-                not current_value or  # Empty
-                current_value < 5 or  # Too low
-                (llm_value > 5 and llm_value > current_value * 3)  # Much higher realistic value
-            )
+        for llm_key, apt_field in boolean_fields.items():
+            if llm_key in data and data[llm_key] is not None:
+                current_value = getattr(apartment, apt_field)
+                if current_value is None:
+                    setattr(apartment, apt_field, data[llm_key])
+                    fields_added.append(f"{apt_field}={data[llm_key]}")
 
-            if should_overwrite:
-                if current_value and current_value != llm_value:
-                    fields_added.append(
-                        f"reparaturrucklage=€{llm_value} (replaced suspicious €{current_value})"
-                    )
-                    logger.info(
-                        f"Replaced reparaturrucklage: €{current_value} → €{llm_value}"
-                    )
-                else:
-                    fields_added.append(f"reparaturrucklage=€{llm_value}")
-                apartment.reparaturrucklage = llm_value
-            else:
-                logger.debug(
-                    f"Kept existing reparaturrucklage=€{current_value} "
-                    f"(LLM suggested €{llm_value}, but current value seems reasonable)"
-                )
-
-        # HWB value: Apply if empty (no suspicious value check needed)
-        if not apartment.hwb_value and data.get("hwb_value"):
-            apartment.hwb_value = data["hwb_value"]
-            fields_added.append(f"hwb_value={data['hwb_value']}")
-
-        # Boolean features
-        if apartment.elevator is None and data.get("elevator") is not None:
-            apartment.elevator = data["elevator"]
-            fields_added.append(f"elevator={data['elevator']}")
-        if apartment.balcony is None and data.get("balcony") is not None:
-            apartment.balcony = data["balcony"]
-            fields_added.append(f"balcony={data['balcony']}")
-        if apartment.terrace is None and data.get("terrace") is not None:
-            apartment.terrace = data["terrace"]
-            fields_added.append(f"terrace={data['terrace']}")
-        if apartment.garden is None and data.get("garden") is not None:
-            apartment.garden = data["garden"]
-            fields_added.append(f"garden={data['garden']}")
-        if apartment.parking is None and data.get("parking") is not None:
-            apartment.parking = data["parking"]
-            fields_added.append(f"parking={data['parking']}")
-        if apartment.cellar is None and data.get("cellar") is not None:
-            apartment.cellar = data["cellar"]
-            fields_added.append(f"cellar={data['cellar']}")
-        if apartment.commission_free is None and data.get("commission_free") is not None:
-            apartment.commission_free = data["commission_free"]
-            fields_added.append(f"commission_free={data['commission_free']}")
-
-        # Log fields filled by LLM
+        # Logging summary
         if fields_added:
-            logger.info(f"LLM filled {len(fields_added)} fields: {', '.join(fields_added)}")
+            logger.info(f"LLM added {len(fields_added)} fields: {', '.join(fields_added[:10])}")
+        if fields_replaced:
+            logger.info(f"LLM replaced {len(fields_replaced)} suspicious values: {', '.join(fields_replaced)}")
+        if fields_kept and self.config.get("llm_settings", {}).get("diagnostics_enabled"):
+            logger.debug(f"LLM kept {len(fields_kept)} existing values")
 
         # Address from LLM
         if data.get("address") and not apartment.full_address:
@@ -990,9 +1093,10 @@ class EnhancedApartmentScraper:
             # Generate LLM summary if enabled (only for valid apartments)
             if is_valid and self.generate_llm_summary and self.summarizer:
                 try:
+                    summary_timeout = self.config.get("llm_settings", {}).get("summary_timeout", 120)
                     summary = await asyncio.wait_for(
                         self.summarizer.generate_summary(apartment),
-                        timeout=90.0,
+                        timeout=summary_timeout,  # Use configured timeout (was 90s, now 120s)
                     )
                     if summary:
                         apartment.llm_summary = summary
@@ -1362,7 +1466,7 @@ class EnhancedApartmentScraper:
         apartment: ApartmentListing
     ) -> None:
         """Save diagnostic extraction data for debugging."""
-        diagnostic_dir = Path(self.config.get("extraction", {}).get("diagnostic_output", "diagnostics"))
+        diagnostic_dir = Path("diagnostics")
         diagnostic_dir.mkdir(exist_ok=True)
 
         diagnostic_file = diagnostic_dir / f"{listing_id}_extraction.json"

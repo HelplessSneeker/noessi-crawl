@@ -210,12 +210,15 @@ class OllamaExtractor:
         html_content: str,
         existing_data: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Build the extraction prompt for the LLM."""
+        """Build enhanced extraction prompt with few-shot examples."""
         existing_str = ""
         if existing_data:
             existing_str = f"""
-Already extracted data (verify and supplement):
+Already extracted data (VERIFY these values - they may be wrong!):
 {json.dumps(existing_data, indent=2, ensure_ascii=False)}
+
+IMPORTANT: If existing values seem suspicious (e.g., betriebskosten_monthly < €30, bedrooms=0 for multi-room apartment),
+extract the correct value from HTML. Your values will replace bad existing data.
 """
 
         return f"""You are an expert at extracting real estate data from Austrian apartment listings.
@@ -223,68 +226,76 @@ Already extracted data (verify and supplement):
 Extract information from this willhaben.at apartment listing HTML.
 Return ONLY valid JSON with the extracted fields. Use null for missing values.
 {existing_str}
-GERMAN TERMINOLOGY GUIDE (look for these terms in the HTML):
-- Betriebskosten, BK, Monatl. Kosten = betriebskosten_monthly
-- Reparaturrücklage, Reparaturfonds, Instandhaltungsrücklage = reparaturrucklage
-- Zimmer, Zi., Räume = rooms
-- Schlafzimmer, Schlafräume = bedrooms
-- Badezimmer, Bad, WC = bathrooms
-- Aufzug, Lift, Personenaufzug = elevator
-- Stock, Stockwerk, Etage, OG (Obergeschoss), EG (Erdgeschoss) = floor
-- Balkon = balcony
-- Terrasse = terrace
-- Garten, Gartenbenützung = garden
-- Parkplatz, Tiefgarage, Garage, Stellplatz, Carport = parking
-- Keller, Kellerabteil, Abstellraum = cellar
-- Baujahr, Errichtungsjahr = year_built
-- HWB, Heizwärmebedarf = hwb_value
-- Erstbezug, Saniert, Neuwertig, Gut, Sehr gut, Renovierungsbedürftig = condition
-- Altbau, Neubau, Gründerzeit = building_type
 
-PRIORITY FIELDS TO EXTRACT (in order of importance):
+=== FEW-SHOT EXAMPLES ===
 
-**CRITICAL FINANCIAL FIELDS** (highest priority - look in tables, specifications, cost breakdowns):
-- betriebskosten_monthly: Monthly operating costs in EUR (number). Look for "Betriebskosten", "Nebenkosten", "BK", "NK", "monatliche Kosten"
-  IMPORTANT: Typical range is €50-500/month. Values under €20 are likely placeholders or errors - mark as null if found.
-- reparaturrucklage: Monthly repair fund contribution in EUR (number). Look for "Reparaturrücklage", "Instandhaltungsrücklage"
-  IMPORTANT: Typical range is €10-200/month. Very low values (< €5) are likely errors - mark as null.
-- price: Purchase price in EUR (number, no currency symbol). Usually prominent, labeled "Preis", "Kaufpreis"
+Example 1 - Financial fields in table:
+HTML: <td>Betriebskosten</td><td>EUR 145,00</td>
+JSON: {{"betriebskosten_monthly": 145.0}}
 
-**PROPERTY FEATURES** (second priority):
-- bedrooms: Number of bedrooms (integer). Look for "Schlafzimmer", may be in room breakdown
-- bathrooms: Number of bathrooms (integer). Look for "Badezimmer", "Bad", "WC"
-- elevator: Has elevator (boolean). Look for "Aufzug", "Lift"
-- balcony: Has balcony (boolean). Look for "Balkon" in features or description
-- terrace: Has terrace (boolean). Look for "Terrasse"
-- garden: Has garden access (boolean). Look for "Garten", "Gartenbenützung"
-- parking: Parking type (one of: tiefgarage, garage, stellplatz, carport, null). Look for "Parkplatz", "Tiefgarage", "Garage"
-- cellar: Has cellar storage (boolean). Look for "Keller", "Kellerabteil"
-- commission_free: Is commission-free (boolean). Look for "Provisionsfrei", "keine Provision"
+Example 2 - Multiple costs:
+HTML: <td>Betriebskosten</td><td>EUR 120,50</td><td>Reparaturrücklage</td><td>EUR 35,00</td>
+JSON: {{"betriebskosten_monthly": 120.5, "reparaturrucklage": 35.0}}
 
-**ADDRESS & OTHER FIELDS**:
-- address: Full address string. Look for "Adresse", street name with postal code
-- title: Listing title (string)
-- size_sqm: Living area in square meters (number). Look for "Wohnfläche", "m²", "Quadratmeter"
-- rooms: Number of rooms (number, can be decimal like 2.5). Look for "Zimmer", "Zi."
-- floor: Floor number (integer, 0 for ground floor). Look for "Stock", "Etage", "EG" (0), "1. OG" (1)
-- year_built: Year constructed (integer). Look for "Baujahr"
-- condition: Property condition (one of: erstbezug, saniert, renovierungsbedurftig, gut, sehr_gut, neuwertig)
-- building_type: Building type (one of: altbau, neubau, grunderzeit)
-- energy_rating: Energy class (A++ to G). Look for "Energieausweis", "HWB-Klasse"
-- hwb_value: HWB energy value in kWh/m²a (number). Look for "HWB", "Heizwärmebedarf"
-- heating_type: Heating type (one of: fernwarme, gas, zentralheizung, fussbodenheizung, elektro, warmepumpe)
-- description_summary: Brief 1-2 sentence summary of key selling points
+Example 3 - Room breakdown:
+HTML: 3 Zimmer (2 Schlafzimmer, 1 Bad)
+JSON: {{"rooms": 3, "bedrooms": 2, "bathrooms": 1}}
 
-WHERE TO FIND DATA:
-- Financial data: Usually in tables with headers "Kosten", "Betriebskosten", specifications section
-- Features: Look in feature lists (often bullet points), amenities section, property details table
-- Numeric values: Often in structured tables with labels and values in adjacent cells
-- Boolean features: If mentioned anywhere in listing = true, otherwise = null
+Example 4 - Features in list:
+HTML: <li>Aufzug</li><li>Balkon</li><li>Tiefgarage</li>
+JSON: {{"elevator": true, "balcony": true, "parking": "tiefgarage"}}
 
-HTML content:
+Example 5 - Floor and year:
+HTML: 3. Stock, Baujahr 1985
+JSON: {{"floor": 3, "year_built": 1985}}
+
+Example 6 - Energy data:
+HTML: HWB: 65,2 kWh/m²a, Energieeffizienzklasse: B
+JSON: {{"hwb_value": 65.2, "energy_rating": "B"}}
+
+=== GERMAN TERMINOLOGY GUIDE ===
+
+CRITICAL FINANCIAL FIELDS (look in cost tables, "Kosten" sections):
+- "Betriebskosten", "BK", "Nebenkosten", "NK" → betriebskosten_monthly
+  * Typical: €50-500/month
+  * Values < €30 are ERRORS - look harder for real value
+
+- "Reparaturrücklage", "Reparaturfonds" → reparaturrucklage
+  * Typical: €20-200/month
+  * Values < €10 are suspicious
+
+Property specs:
+- "Zimmer" → rooms (can be decimal: 2.5)
+- "Schlafzimmer" → bedrooms (integer)
+- "Badezimmer", "Bad" → bathrooms (integer)
+- "Stock", "EG" (=0), "1. OG" (=1) → floor
+
+Features:
+- "Aufzug" → elevator
+- "Balkon" → balcony
+- "Parkplatz", "Tiefgarage" → parking
+
+=== VALIDATION RULES ===
+
+Before returning JSON, validate:
+- betriebskosten_monthly: 30-2000 (if < 30, likely error)
+- reparaturrucklage: 10-500
+- size_sqm: 10-1000
+- rooms: 1-20
+- bedrooms: 0-10
+- bathrooms: 1-10
+- floor: -2 to 20
+- year_built: 1700-2030
+- hwb_value: 5-1000
+
+=== HTML CONTENT ===
+
 {html_content}
 
-Return only the JSON object, no explanation:"""
+Return only the JSON object with these fields (use null for missing):
+{{"title": "...", "price": 123000, "size_sqm": 45.5, "rooms": 2, ...}}
+
+Return only the JSON, no explanation."""
 
     def _parse_json_response(self, text: str) -> Optional[Dict[str, Any]]:
         """
@@ -393,16 +404,18 @@ Return only the JSON object, no explanation:"""
 
     def _preprocess_html(self, html: str) -> str:
         """
-        Preprocess HTML before sending to LLM.
+        Preprocess HTML with priority-based truncation.
 
-        - Removes script tags (except application/ld+json)
-        - Strips excessive whitespace
-        - Truncates to configured limit
+        Strategy:
+        1. Preserve JSON-LD (highest value)
+        2. Remove scripts/styles
+        3. Preserve property details sections
+        4. Smart truncation if needed
 
         Returns:
             Cleaned HTML string
         """
-        # First, protect JSON-LD scripts with placeholders
+        # Protect JSON-LD with placeholders
         json_ld_scripts = []
         def save_json_ld(match):
             json_ld_scripts.append(match.group(0))
@@ -410,33 +423,51 @@ Return only the JSON object, no explanation:"""
 
         html = re.sub(
             r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>.*?</script>',
-            save_json_ld,
-            html,
-            flags=re.DOTALL | re.IGNORECASE
+            save_json_ld, html, flags=re.DOTALL | re.IGNORECASE
         )
 
-        # Remove all other script tags
+        # Remove scripts/styles
         html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
-
-        # Restore JSON-LD scripts
-        for idx, script in enumerate(json_ld_scripts):
-            html = html.replace(f"___JSON_LD_PLACEHOLDER_{idx}___", script)
-
-        # Remove style tags
         html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
 
-        # Collapse excessive whitespace
+        # Collapse whitespace
         html = re.sub(r'\s+', ' ', html)
         html = re.sub(r'>\s+<', '><', html)
 
-        # Truncate to limit
+        # Restore JSON-LD
+        for idx, script in enumerate(json_ld_scripts):
+            html = html.replace(f"___JSON_LD_PLACEHOLDER_{idx}___", script)
+
+        # Smart truncation
         if len(html) > self.html_max_chars:
-            if self.diagnostic_logging:
-                logger.debug(
-                    f"HTML truncated: {len(html)} → {self.html_max_chars} chars "
-                    f"({(self.html_max_chars/len(html)*100):.1f}% retained)"
-                )
-            return html[:self.html_max_chars] + "\n... [truncated]"
+            original_len = len(html)
+
+            # Extract priority sections
+            priority_patterns = [
+                r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>.*?</script>',
+                r'<table[^>]*>.*?</table>',  # Tables often have costs
+                r'<div[^>]*class="[^"]*specification[^"]*"[^>]*>.*?</div>',
+                r'<div[^>]*class="[^"]*attributes[^"]*"[^>]*>.*?</div>',
+                r'<ul[^>]*>.*?</ul>',  # Feature lists
+            ]
+
+            priority_content = []
+            for pattern in priority_patterns:
+                matches = re.findall(pattern, html, flags=re.DOTALL | re.IGNORECASE)
+                priority_content.extend(matches)
+
+            priority_html = '\n'.join(priority_content)
+
+            if len(priority_html) <= self.html_max_chars:
+                html = priority_html
+                if self.diagnostic_logging:
+                    logger.info(f"HTML truncation (priority): {original_len} → {len(html)} chars")
+            else:
+                html = priority_html[:self.html_max_chars]
+                if self.diagnostic_logging:
+                    logger.info(f"HTML truncation (hard): {original_len} → {len(html)} chars")
+
+            html += "\n... [truncated]"
 
         return html
 
@@ -454,15 +485,15 @@ Return only the JSON object, no explanation:"""
         # Type validation and cleaning
         type_validators = {
             "price": (float, lambda x: x > 0),
-            "size_sqm": (float, lambda x: 0 < x < 1000),
-            "rooms": (float, lambda x: 0 < x < 20),
+            "size_sqm": (float, lambda x: 10 < x < 1000),  # Tightened: Min 10 m²
+            "rooms": (float, lambda x: 0.5 < x < 20),  # Allow 0.5 for studio
             "bedrooms": (int, lambda x: 0 <= x < 20),
             "bathrooms": (int, lambda x: 0 <= x < 10),
-            "floor": (int, lambda x: -2 <= x < 100),
-            "year_built": (int, lambda x: 1800 <= x <= 2030),
-            "hwb_value": (float, lambda x: 0 < x < 500),
-            "betriebskosten_monthly": (float, lambda x: 10 <= x < 2000),  # Relaxed: Min €10/month
-            "reparaturrucklage": (float, lambda x: 1 <= x < 500),  # Relaxed: Min €1/month
+            "floor": (int, lambda x: -2 <= x < 25),  # Tightened from 100
+            "year_built": (int, lambda x: 1700 <= x <= 2030),  # Expanded from 1800
+            "hwb_value": (float, lambda x: 5 < x < 1000),  # Tightened and expanded range
+            "betriebskosten_monthly": (float, lambda x: 30 <= x < 2000),  # INCREASED from €10 to €30
+            "reparaturrucklage": (float, lambda x: 10 <= x < 500),  # INCREASED from €1 to €10
         }
 
         boolean_fields = [
