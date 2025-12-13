@@ -11,7 +11,7 @@
     "9523"
   ],
   "output_folder": "output",
-  "max_pages": 1,
+  "max_pages": null,
 
   "llm_settings": {
     "enabled": true,
