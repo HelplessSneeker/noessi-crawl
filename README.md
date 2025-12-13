@@ -47,7 +47,7 @@ uv run playwright install
 
 # Optional: Install Ollama for LLM extraction
 # See https://ollama.ai for installation
-# Then pull a model: ollama pull qwen3:8b
+# Then pull a model: ollama pull qwen2.5:14b
 ```
 
 ## Configuration
@@ -66,14 +66,18 @@ Edit `config.json` to customize your search:
   "output_folder": "output",
   "max_pages": 1,
 
-  "extraction": {
-    "use_llm": true,
-    "llm_model": "qwen3:8b",
-    "fallback_to_regex": true,
-    "diagnostic_mode": false,
-    "diagnostic_output": "diagnostics",
-    "diagnostic_logging": true,
-    "html_max_chars": 50000
+  "llm_settings": {
+    "enabled": true,
+    "model": "qwen2.5:14b",
+    "html_max_chars": 100000,
+    "generate_summary": true,
+    "summary_max_words": 150,
+    "diagnostics_enabled": false,
+    "trigger_mode": "conservative",
+    "quality_check_enabled": true,
+    "extraction_timeout": 180,
+    "summary_timeout": 120,
+    "summary_min_words": 80
   },
 
   "filters": {
@@ -100,10 +104,7 @@ Edit `config.json` to customize your search:
       "graz": 11.0,
       "linz": 10.5,
       "salzburg": 14.0
-    },
-    "generate_llm_summary": true,
-    "llm_summary_model": "qwen3:8b",
-    "llm_summary_max_words": 150
+    }
   },
 
   "output": {
@@ -132,17 +133,21 @@ Edit `config.json` to customize your search:
 | `output_folder` | string | Output directory (default: "output") |
 | `max_pages` | number/null | Max pages to scrape (null = unlimited) |
 
-#### Extraction Settings
+#### LLM Settings
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `use_llm` | boolean | Enable Ollama LLM extraction for missing fields |
-| `llm_model` | string | Ollama model to use (e.g., "qwen3:8b") |
-| `fallback_to_regex` | boolean | Use regex if LLM fails |
-| `diagnostic_mode` | boolean | Save diagnostic HTML files for troubleshooting |
-| `diagnostic_output` | string | Directory for diagnostic files (default: "diagnostics") |
-| `diagnostic_logging` | boolean | **NEW:** Enable detailed logging of raw LLM responses |
-| `html_max_chars` | number | **NEW:** Max HTML chars sent to LLM (default: 50000, was 20000) |
+| `enabled` | boolean | Enable Ollama LLM for extraction and summaries |
+| `model` | string | Ollama model to use (e.g., "qwen2.5:14b") |
+| `html_max_chars` | number | Max HTML chars sent to LLM (default: 100000) |
+| `generate_summary` | boolean | Generate AI-powered investment summaries |
+| `summary_max_words` | number | Max words per summary (default: 150) |
+| `summary_min_words` | number | Min words per summary (default: 80) |
+| `diagnostics_enabled` | boolean | Enable diagnostic logging and data saving |
+| `trigger_mode` | string | When to trigger LLM ("conservative", "aggressive", "always") |
+| `quality_check_enabled` | boolean | Enable quality validation of LLM responses |
+| `extraction_timeout` | number | Timeout in seconds for LLM extraction (default: 180) |
+| `summary_timeout` | number | Timeout in seconds for summary generation (default: 120) |
 
 #### Filter Settings
 
@@ -167,9 +172,6 @@ Edit `config.json` to customize your search:
 | `transaction_cost_percent` | number | Total transaction costs % (default: 9%) |
 | `loan_term_years` | number | Mortgage loan term in years |
 | `estimated_rent_per_sqm` | object | Rent estimates by region (€/m²/month) |
-| `generate_llm_summary` | boolean | **NEW:** Generate AI investment summaries for PDF |
-| `llm_summary_model` | string | **NEW:** Model for summaries (default: "qwen3:8b") |
-| `llm_summary_max_words` | number | **NEW:** Max words per summary (default: 150) |
 
 #### Output Settings
 
@@ -277,12 +279,13 @@ The `investment_summary.pdf` provides a professional report with:
 
 #### LLM-Generated Summaries
 
-When `generate_llm_summary: true` in config, each apartment gets a 100-150 word German investment analysis that:
+When `llm_settings.generate_summary: true` in config, each apartment gets an 80-150 word German investment analysis that:
 - Synthesizes all data into investment insights
 - Balances opportunities and risks
 - Provides clear investment perspective
 - Appears in PDF after positive/risk factors section
 - Generated using Ollama (requires Ollama running locally)
+- Quality-checked when `quality_check_enabled: true`
 
 ## Investment Scoring
 
@@ -346,17 +349,19 @@ noessi-crawl/
    - Strict minimums: size ≥ 10 m², price > 0, costs > 0
    - Diagnostic logging shows extracted values for debugging
 4. **LLM extraction** (optional, improved): Ollama for missing fields
-   - **NEW: Enhanced HTML preprocessing** (strips scripts/styles, 50KB limit)
-   - **NEW: 5-strategy JSON parsing** (handles malformed responses)
-   - **NEW: Diagnostic logging** (see raw LLM responses when enabled)
-   - **NEW: Relaxed validation** (€10+ betriebskosten, €1+ reparaturrücklage)
-   - Robust timeout handling (10s connect, 120s read, 180s hard timeout)
+   - **HTML preprocessing** (strips scripts/styles, 100KB limit)
+   - **5-strategy JSON parsing** (handles malformed responses)
+   - **Diagnostic logging** (see raw LLM responses when enabled)
+   - **Trigger modes**: Conservative (missing critical fields), Aggressive (any missing), Always
+   - **Quality validation**: Validates LLM responses for accuracy
+   - **Configurable timeouts**: 180s default for extraction
    - Graceful failures - continues without LLM data if unavailable
-5. **LLM summary generation** (optional, new): AI investment analysis
+5. **LLM summary generation** (optional): AI investment analysis
    - Generated after investment scoring completes
-   - 100-150 word German summaries
+   - 80-150 word German summaries
    - Appears in PDF reports after positive/risk factors
-   - 60s timeout, graceful degradation if Ollama unavailable
+   - Configurable timeout (120s default), quality checking enabled
+   - Graceful degradation if Ollama unavailable
 
 ### Austrian-Specific Features
 
@@ -449,24 +454,28 @@ uv run python tests/test_star_icon.py   # Ad filtering (star icon detection)
 
 **LLM extraction fails or returns no data:**
 - Verify Ollama is installed and running: `ollama list`
-- Pull model if missing: `ollama pull qwen3:8b`
-- **Enable diagnostic logging**: Set `diagnostic_logging: true` in config.json
+- Pull model if missing: `ollama pull qwen2.5:14b`
+- **Enable diagnostic logging**: Set `llm_settings.diagnostics_enabled: true` in config.json
 - Check logs for "LLM raw response" to see what the model actually returned
-- Try different parsing strategies (automatically attempted)
+- Try different trigger modes: "conservative" (default), "aggressive", or "always"
+- Adjust `extraction_timeout` if LLM responses are slow
 - Scraper continues gracefully without LLM data on failures
 
-**LLM extraction improves after update:**
-- **HTML preprocessing** now removes bloat (scripts/styles) - more useful data sent to LLM
-- **50KB limit** (was 20KB) - captures more complete property specifications
-- **5 parsing strategies** handle malformed JSON better
-- **Relaxed validation** accepts realistic low-cost apartments (€10+ instead of €20+)
+**LLM extraction quality:**
+- **Trigger modes** control when LLM is used:
+  - `conservative`: Only when critical fields missing (recommended)
+  - `aggressive`: When any fields missing
+  - `always`: For every apartment (slow, expensive)
+- **Quality checking**: Enable with `quality_check_enabled: true` to validate responses
+- **HTML preprocessing** removes bloat (scripts/styles) - up to 100KB sent to LLM
+- **5 parsing strategies** handle malformed JSON automatically
 
 **LLM summary generation issues:**
-- Check `generate_llm_summary: true` in config.json under `analysis` section
+- Check `llm_settings.generate_summary: true` in config.json
 - Verify Ollama is running (same as extraction)
 - Summaries only generated for **valid apartments** (passed critical field validation)
-- Check logs: "LLM summary generated (X chars)" indicates success
-- Timeout is 90s (shorter than extraction) - check logs for timeout warnings
+- Check logs: "LLM summary generated (X chars, Y words)" indicates success
+- Adjust `summary_timeout` and `summary_min_words` as needed
 - PDFs render correctly with or without summaries
 
 **Monitoring Progress:**

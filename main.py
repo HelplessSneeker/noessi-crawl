@@ -396,6 +396,44 @@ class EnhancedApartmentScraper:
                 except (ValueError, TypeError):
                     pass
 
+            # Extract address from nested structure: offers > availableAtOrFrom > address
+            available_at = offers.get("availableAtOrFrom", {})
+            if isinstance(available_at, dict):
+                address = available_at.get("address", {})
+                if isinstance(address, dict):
+                    # Extract structured address fields
+                    if address.get("postalCode") and not apartment.postal_code:
+                        apartment.postal_code = str(address["postalCode"])
+                        logger.debug(f"Extracted postal_code from JSON-LD: {apartment.postal_code}")
+
+                    if address.get("addressLocality") and not apartment.city:
+                        apartment.city = str(address["addressLocality"])
+                        logger.debug(f"Extracted city from JSON-LD: {apartment.city}")
+
+                    if address.get("streetAddress") and not apartment.street:
+                        street_text = str(address["streetAddress"])
+                        # Parse street and house number
+                        street_match = re.match(r"^(.+?)\s+(\d+[a-zA-Z]?)$", street_text)
+                        if street_match:
+                            apartment.street = street_match.group(1).strip()
+                            apartment.house_number = street_match.group(2)
+                            logger.debug(f"Extracted street from JSON-LD: {apartment.street} {apartment.house_number}")
+                        else:
+                            apartment.street = street_text
+                            logger.debug(f"Extracted street from JSON-LD: {apartment.street}")
+
+                    if address.get("addressRegion") and not apartment.state:
+                        apartment.state = str(address["addressRegion"])
+
+                    # Vienna district extraction from postal code
+                    if apartment.postal_code and apartment.postal_code.startswith("1"):
+                        district_num = self.address_parser.extract_district_from_text(apartment.postal_code)
+                        if district_num and not apartment.district_number:
+                            apartment.district_number = district_num
+                            from models.constants import VIENNA_DISTRICTS
+                            apartment.district = VIENNA_DISTRICTS.get(district_num, {}).get("name")
+                            logger.debug(f"Extracted Vienna district from JSON-LD postal code: {district_num}")
+
     def _apply_regex_data(
         self, apartment: ApartmentListing, data: Dict[str, Any], allow_betriebskosten_overwrite: bool = False
     ) -> None:
