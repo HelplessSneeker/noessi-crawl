@@ -15,8 +15,8 @@ from llm.analyzer import InvestmentAnalyzer
 from llm.extractor import OllamaExtractor
 from llm.summarizer import ApartmentSummarizer
 from models.apartment import ApartmentListing
-from models.constants import AREA_ID_TO_LOCATION, PLZ_TO_AREA_ID
 from models.metadata import ApartmentMetadata
+from portals.base import PortalAdapter
 from utils.address_parser import AustrianAddressParser
 from utils.extractors import AustrianRealEstateExtractor
 from utils.markdown_generator import MarkdownGenerator
@@ -38,15 +38,17 @@ logging.getLogger('fontTools.subset').setLevel(logging.WARNING)
 class EnhancedApartmentScraper:
     """Enhanced apartment scraper with investment analysis capabilities."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], portal_adapter: PortalAdapter):
         """
-        Initialize the scraper with configuration.
+        Initialize the scraper with configuration and portal adapter.
 
         Args:
             config: Configuration dictionary from config.json
+            portal_adapter: Portal-specific adapter instance
         """
         self.config = config
-        self.portal = config.get("portal", "willhaben")
+        self.adapter = portal_adapter
+        self.portal = self.adapter.get_portal_name()
 
         # Generate timestamped run folder
         self.run_timestamp = datetime.now()
@@ -121,9 +123,6 @@ class EnhancedApartmentScraper:
         self.apartments_folder = self.run_folder / "apartments"
         self.apartments_folder.mkdir(parents=True, exist_ok=True)
 
-        # Translate postal codes to area_ids for willhaben
-        self.area_ids = self._translate_postal_codes_to_area_ids()
-
         # Graceful interrupt handling
         self.interrupted = False
 
@@ -149,83 +148,6 @@ class EnhancedApartmentScraper:
             logger.error("Second interrupt received - forcing exit!")
             raise KeyboardInterrupt
 
-    def _translate_postal_codes_to_area_ids(self) -> List[int]:
-        """Translate postal codes from config to willhaben area_ids."""
-        area_ids = []
-
-        # Support both old format (area_ids) and new format (postal_codes)
-        if "postal_codes" in self.config:
-            postal_codes = self.config["postal_codes"]
-            for plz in postal_codes:
-                plz_str = str(plz)
-                if plz_str in PLZ_TO_AREA_ID:
-                    area_ids.append(PLZ_TO_AREA_ID[plz_str])
-                    logger.debug(
-                        f"Translated PLZ {plz_str} to area_id {PLZ_TO_AREA_ID[plz_str]}"
-                    )
-                else:
-                    logger.warning(
-                        f"Unknown postal code {plz_str} - no area_id mapping found"
-                    )
-        elif "area_ids" in self.config:
-            # Legacy support: use area_ids directly
-            area_ids = self.config["area_ids"]
-            logger.info("Using legacy 'area_ids' format from config")
-        else:
-            logger.warning("No 'postal_codes' or 'area_ids' found in config")
-
-        return area_ids
-
-    def build_willhaben_url(self, page: int = 1) -> str:
-        """Build willhaben.at search URL from configuration parameters."""
-        base_url = "https://www.willhaben.at/iad/immobilien/eigentumswohnung/eigentumswohnung-angebote"
-
-        params = []
-
-        # Add area IDs (translated from postal codes)
-        for area_id in self.area_ids:
-            params.append(f"areaId={area_id}")
-
-        # Add price threshold from filters
-        max_price = self.filters.get("max_price")
-        if max_price:
-            params.append(f"PRICE_TO={int(max_price)}")
-
-        # Add pagination
-        params.append(f"page={page}")
-        params.append("isNavigation=true")
-
-        return f"{base_url}?{'&'.join(params)}"
-
-    def extract_listing_urls(self, html: str) -> List[Dict[str, str]]:
-        """Extract apartment URLs from JSON-LD structured data."""
-        try:
-            match = re.search(
-                r'<script type="application/ld\+json">({.*?"@type":"ItemList".*?})</script>',
-                html,
-                re.DOTALL,
-            )
-            if match:
-                json_data = json.loads(match.group(1))
-                items = json_data.get("itemListElement", [])
-                return [
-                    {"url": f"https://www.willhaben.at{item.get('url', '')}"}
-                    for item in items
-                    if item.get("url")
-                ]
-        except Exception as e:
-            logger.warning(f"Error extracting JSON-LD: {e}")
-        return []
-
-    def extract_listing_id(self, url: str) -> str:
-        """Extract listing ID from URL."""
-        # willhaben URLs typically end with the listing ID
-        match = re.search(r"/(\d+)/?$", url)
-        if match:
-            return match.group(1)
-        # Fallback to hash of URL
-        return str(hash(url))
-
     async def extract_apartment_data(
         self, html: str, url: str
     ) -> Optional[ApartmentListing]:
@@ -236,11 +158,10 @@ class EnhancedApartmentScraper:
         2. Regex patterns (fallback)
         3. LLM extraction (if enabled, for missing fields)
         """
-        listing_id = self.extract_listing_id(url)
+        listing_id = self.adapter.extract_listing_id(url)
 
-        # Check for ad filtering - star icon indicates real listing
-        star_icon_path = "m12 4 2.09 4.25a1.52 1.52 0 0 0 1.14.82l4.64.64-3.42 3.32"
-        if star_icon_path not in html:
+        # Check for ad filtering
+        if self.adapter.should_filter_ad(html):
             logger.debug(f"Skipping ad/promoted listing: {url}")
             return None
 
@@ -276,7 +197,7 @@ class EnhancedApartmentScraper:
         self._apply_regex_data(apartment, regex_data, allow_betriebskosten_overwrite=True)
 
         # Extract address
-        address_text = self._extract_address_from_html(html, url)
+        address_text = self.adapter.extract_address_from_html(html, url)
         if address_text:
             parsed_address = self.address_parser.parse_address(address_text)
             self._apply_address_data(apartment, parsed_address)
@@ -835,83 +756,6 @@ class EnhancedApartmentScraper:
 
         return has_missing
 
-    def _extract_address_from_html(self, html: str, url: str) -> Optional[str]:
-        """Extract address from HTML or URL."""
-        # Strategy 1: Look for address in JSON-LD
-        json_ld_match = re.search(
-            r'"address"[:\s]*\{[^}]*"streetAddress"[:\s]*"([^"]+)"', html
-        )
-        if json_ld_match:
-            addr = json_ld_match.group(1).strip()
-            # Only return if it looks like a real address (has street name or postal code)
-            if re.search(r"\d{4}|straße|gasse|weg|platz", addr, re.IGNORECASE):
-                return addr
-
-        # Strategy 2: Look for address in structured data attributes
-        # willhaben often has address in data attributes or specific divs
-        address_patterns = [
-            # Full address with street, postal code and city
-            r"([A-Za-zäöüÄÖÜß\-]+(?:straße|gasse|weg|platz|ring|allee)\s+\d+[^,<]*,\s*\d{4}\s+[A-Za-zäöüÄÖÜß\s]+)",
-            # Postal code + city pattern (more cities)
-            r"(\d{4})\s+(Wien|Graz|Linz|Salzburg|Innsbruck|Klagenfurt|Villach|St\.\s*Pölten|Wels|Dornbirn|Steyr|Wiener\s*Neustadt|Feldkirch|Bregenz)[^<]*",
-            # Address label patterns
-            r"(?:Adresse|Standort|Lage)[:\s]*</[^>]+>\s*<[^>]+>([^<]+)",
-            r"(?:Adresse|Standort|Lage)[:\s]*([^<\n]{10,80})",
-        ]
-
-        for pattern in address_patterns:
-            match = re.search(pattern, html, re.IGNORECASE)
-            if match:
-                addr = (
-                    match.group(1).strip()
-                    if match.lastindex
-                    else match.group(0).strip()
-                )
-                # Clean up HTML entities and extra whitespace
-                addr = re.sub(r"\s+", " ", addr)
-                addr = addr.replace("&nbsp;", " ").strip()
-                if len(addr) > 5 and len(addr) < 200:
-                    return addr
-
-        # Strategy 3: Extract from URL
-        # Pattern: /wien-1030-landstrasse/ or /kaernten/klagenfurt/
-        url_patterns = [
-            # Vienna with postal code: /wien-1030-landstrasse/
-            (
-                r"/wien-(\d{4})-([^/]+)",
-                lambda m: f"{m.group(1)} Wien",
-            ),
-            # Other cities with postal code: /1030-landstrasse/
-            (
-                r"/(\d{4})-([^/]+)",
-                lambda m: f"{m.group(1)}",
-            ),
-            # State/City format: /kaernten/villach/ or /wien/leopoldstadt/
-            (
-                r"/(?:kaernten|kärnten)/([a-z\-]+)/",
-                lambda m: f"{m.group(1).replace('-', ' ').title()}, Kärnten",
-            ),
-            (
-                r"/(?:steiermark)/([a-z\-]+)/",
-                lambda m: f"{m.group(1).replace('-', ' ').title()}, Steiermark",
-            ),
-            (
-                r"/(?:tirol)/([a-z\-]+)/",
-                lambda m: f"{m.group(1).replace('-', ' ').title()}, Tirol",
-            ),
-            (
-                r"/wien/([a-z\-]+)/",
-                lambda m: "Wien",
-            ),
-        ]
-
-        for pattern, formatter in url_patterns:
-            match = re.search(pattern, url.lower())
-            if match:
-                return formatter(match)
-
-        return None
-
     def _extract_title(self, html: str) -> Optional[str]:
         """Extract title from HTML."""
         # Try h1 tag
@@ -1114,7 +958,7 @@ class EnhancedApartmentScraper:
         Returns:
             Processed ApartmentListing or None if failed/filtered
         """
-        listing_id = self.extract_listing_id(url)
+        listing_id = self.adapter.extract_listing_id(url)
 
         # Check for duplicates
         if listing_id in self.seen_listings:
@@ -1124,11 +968,8 @@ class EnhancedApartmentScraper:
         self.seen_listings.add(listing_id)
 
         try:
-            result = await crawler.arun(
-                url=url,
-                wait_for="css:main",
-                delay_before_return_html=2.0,
-            )
+            crawler_config = self.adapter.get_crawler_config()
+            result = await crawler.arun(url=url, **crawler_config)
 
             if not result.success:
                 logger.warning(f"Failed to fetch: {url}")
@@ -1217,22 +1058,18 @@ class EnhancedApartmentScraper:
         Returns:
             List of apartment metadata from this page
         """
-        url = self.build_willhaben_url(page)
+        url = self.adapter.build_search_url(page)
         logger.info(f"Scraping page {page}: {url}")
 
-        result = await crawler.arun(
-            url=url,
-            wait_for="css:section",
-            delay_before_return_html=3.0,
-            js_code="window.scrollTo(0, document.body.scrollHeight);",
-        )
+        search_config = self.adapter.get_search_crawler_config()
+        result = await crawler.arun(url=url, **search_config)
 
         if not result.success:
             logger.error(f"Failed to scrape page {page}: {result.error_message}")
             return []
 
         # Extract listing URLs
-        listings = self.extract_listing_urls(result.html)
+        listings = self.adapter.extract_listing_urls(result.html)
         logger.info(f"Found {len(listings)} listings on page {page}")
 
         if not listings:
@@ -1616,11 +1453,13 @@ async def main():
     try:
         config = await load_config()
 
-        if config["portal"] != "willhaben":
-            logger.error(f"Unsupported portal: {config['portal']}")
-            return
+        # Get portal adapter
+        from portals import get_adapter
 
-        scraper = EnhancedApartmentScraper(config)
+        adapter = get_adapter(config)
+
+        # Initialize scraper with adapter
+        scraper = EnhancedApartmentScraper(config, adapter)
         apartments = await scraper.run()
 
         logger.info(

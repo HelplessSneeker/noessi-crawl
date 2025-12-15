@@ -64,9 +64,19 @@ Output: `output/apartments_YYYY-MM-DD-HHMMSS/`
 noessi-crawl/
 ├── main.py                    # EnhancedApartmentScraper entry point
 ├── config.json                # Configuration
+├── portals/                   # Portal adapter pattern (NEW - 2025-12-15)
+│   ├── __init__.py            # Factory: get_adapter()
+│   ├── base.py                # PortalAdapter abstract base class
+│   ├── willhaben/             # Willhaben.at portal
+│   │   ├── __init__.py
+│   │   ├── adapter.py         # WillhabenAdapter implementation
+│   │   └── constants.py       # PLZ_TO_AREA_ID, AREA_ID_TO_LOCATION
+│   └── immoscout/             # ImmobilienScout24.at portal (placeholder)
+│       ├── __init__.py
+│       └── adapter.py         # ImmoscoutAdapter (placeholder)
 ├── models/
 │   ├── apartment.py           # ApartmentListing dataclass (~65 fields)
-│   ├── constants.py           # Austrian constants (PLZ_TO_AREA_ID, VIENNA_DISTRICTS)
+│   ├── constants.py           # Austrian constants (VIENNA_DISTRICTS, rents, transaction costs)
 │   └── metadata.py            # ApartmentMetadata for tracking
 ├── utils/
 │   ├── extractors.py          # AustrianRealEstateExtractor (regex patterns)
@@ -81,6 +91,8 @@ noessi-crawl/
 │   └── analyzer.py            # InvestmentAnalyzer (scoring, yield, cash flow)
 ├── output/                    # Generated files (gitignored)
 └── tests/                     # Unit and integration tests
+    ├── test_portal_adapters.py           # Portal adapter unit tests (NEW)
+    └── test_backward_compatibility.py    # Backward compatibility tests (NEW)
 ```
 
 ## Configuration
@@ -98,7 +110,7 @@ Edit `config.json` to customize behavior. Key sections:
 }
 ```
 
-**Important**: Use `postal_codes` (auto-translates via `PLZ_TO_AREA_ID` in `models/constants.py`).
+**Important**: Use `postal_codes` (auto-translates via portal adapters, not in `models/constants.py`).
 
 ### LLM Settings
 
@@ -189,13 +201,65 @@ Edit `config.json` to customize behavior. Key sections:
 
 ## Architecture Details
 
+### Portal Adapter Pattern (NEW - 2025-12-15)
+
+The scraper uses the **Portal Adapter Pattern** to support multiple Austrian real estate portals while maintaining clean separation between portal-specific logic and domain logic.
+
+**Key Principle**: Portal adapters handle ONLY portal-specific operations (URL building, HTML extraction patterns, ad filtering). All Austrian real estate domain logic (address parsing, investment analysis, LLM extraction, PDF generation) remains portal-agnostic.
+
+#### PortalAdapter Interface
+
+Abstract base class defining 9 methods each portal must implement:
+
+1. **`get_portal_name() -> str`** - Portal identifier ("willhaben", "immoscout")
+2. **`normalize_config(config) -> Dict`** - Translate config to portal format
+3. **`build_search_url(page, **kwargs) -> str`** - Build search URL with filters
+4. **`extract_listing_urls(html) -> List[Dict]`** - Extract URLs from search results
+5. **`extract_listing_id(url) -> str`** - Extract listing ID from URL
+6. **`should_filter_ad(html) -> bool`** - Detect promoted/sponsored ads
+7. **`extract_address_from_html(html, url) -> Optional[str]`** - Extract raw address
+8. **`get_crawler_config() -> Dict`** - Detail page crawler settings (optional override)
+9. **`get_search_crawler_config() -> Dict`** - Search page crawler settings (optional override)
+
+#### Current Implementations
+
+**WillhabenAdapter** (`portals/willhaben/adapter.py`):
+- Translates postal codes to Willhaben area_ids
+- Supports both `postal_codes` (new) and `area_ids` (legacy) config formats
+- Filters promoted ads using star icon SVG path detection
+- Extracts listing URLs from JSON-LD ItemList format
+- Portal-specific constants in `portals/willhaben/constants.py`
+
+**ImmoscoutAdapter** (`portals/immoscout/adapter.py`):
+- Placeholder implementation (logs warnings)
+- Returns safe defaults (empty lists, None, False)
+- Ready for future implementation
+
+#### Factory Pattern
+
+```python
+from portals import get_adapter
+
+config = {"portal": "willhaben", "postal_codes": ["1010", "1020"], "filters": {...}}
+adapter = get_adapter(config)  # Returns WillhabenAdapter
+scraper = EnhancedApartmentScraper(config, adapter)
+```
+
+#### Portal-Agnostic Components (~2,000 LOC)
+
+These components work across ANY Austrian portal without modification:
+- **Data extraction**: `AustrianRealEstateExtractor`, `OllamaExtractor`, JSON-LD parsing
+- **Domain logic**: `AustrianAddressParser`, `InvestmentAnalyzer`, `ApartmentSummarizer`
+- **Output**: `MarkdownGenerator`, `PDFGenerator`
+- **Models**: `ApartmentListing`, `models/constants.py` (Austrian-specific data)
+
 ### Main Scraper Flow (main.py)
 
-`EnhancedApartmentScraper` orchestrates:
+`EnhancedApartmentScraper` orchestrates (with dependency injection):
 
-1. **Initialization**: Load config, translate postal codes to area_ids
-2. **URL Building**: Constructs search URL with area_ids and price_max
-3. **Page Scraping**: Fetches listing pages, extracts URLs from JSON-LD
+1. **Initialization**: Load config, create portal adapter via factory
+2. **URL Building**: Adapter builds search URL with portal-specific parameters
+3. **Page Scraping**: Fetches listing pages, adapter extracts URLs
 4. **Apartment Processing**: Fetches detail pages, multi-strategy extraction
 5. **Critical Field Validation**: Rejects apartments missing price, size_sqm, betriebskosten_monthly
 6. **Investment Analysis**: Calculates metrics and score via `InvestmentAnalyzer`
@@ -340,6 +404,10 @@ Each apartment: `YYYY-MM-DD_city_district_price.md`
 # All unit tests
 uv run pytest tests/ -v
 
+# Portal adapter tests (NEW - 2025-12-15)
+uv run pytest tests/test_portal_adapters.py -v           # 19 tests
+uv run pytest tests/test_backward_compatibility.py -v    # 10 tests
+
 # Specific modules
 uv run pytest tests/test_extraction.py -v      # Regex patterns
 uv run pytest tests/test_range_parsing.py -v   # Range detection
@@ -351,6 +419,11 @@ uv run python tests/test_single.py      # Single apartment
 uv run python tests/test_star_icon.py   # Ad filtering
 ```
 
+**Test Coverage** (as of 2025-12-15):
+- Portal adapters: 19 tests (postal codes, URL building, filtering, extraction)
+- Backward compatibility: 10 tests (legacy configs, new configs, edge cases)
+- Total: 76/79 unit tests passing (96% pass rate)
+
 ## Common Development Tasks
 
 ### Adding Postal Codes
@@ -360,13 +433,16 @@ Edit `config.json`:
 "postal_codes": ["1010", "1020", "9020"]
 ```
 
-Or add to `models/constants.py`:
+Or add to portal-specific constants (`portals/willhaben/constants.py`):
 ```python
 PLZ_TO_AREA_ID = {
-    "1010": 900,  # Vienna 1st district
+    "1010": 201,  # Vienna 1st district
+    "1020": 202,  # Vienna 2nd district
     # Add new mapping here
 }
 ```
+
+**Note**: Portal-specific constants have been moved from `models/constants.py` to individual portal adapter folders as of 2025-12-15.
 
 ### Modifying Investment Scoring
 
@@ -407,11 +483,12 @@ Edit `utils/translations.py`:
 
 ## Known Limitations
 
-- Only supports willhaben.at (hardcoded URL patterns)
+- Currently supports willhaben.at only (ImmobilienScout24.at is placeholder)
 - No authentication (public listings only)
 - LLM requires local Ollama installation
 - Filters not actively enforced (ranking-based instead)
 - No duplicate checking across runs
+- No multi-portal parallel/sequential execution (single portal per run)
 
 ## Troubleshooting
 

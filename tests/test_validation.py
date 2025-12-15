@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pytest
 from models.apartment import ApartmentListing
 from main import EnhancedApartmentScraper
+from portals import get_adapter
 
 
 class TestCriticalFieldValidation:
@@ -23,7 +24,8 @@ class TestCriticalFieldValidation:
             "extraction": {"use_llm": False},
             "output": {"summary_top_n": 20}
         }
-        return EnhancedApartmentScraper(config)
+        adapter = get_adapter(config)
+        return EnhancedApartmentScraper(config, adapter)
 
     def test_validation_all_fields_present(self, scraper):
         """Test validation passes when all critical fields present."""
