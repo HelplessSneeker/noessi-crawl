@@ -39,11 +39,14 @@ class AustrianRealEstateExtractor:
 
     # Price patterns - updated to capture ranges
     PRICE_PATTERNS: List[Pattern] = [
+        # ImmobilienScout24.at specific: data-testid="primary-price">ab 229.000 €
+        re.compile(r'data-testid=["\']primary-price["\'][^>]*>(?:ab\s+)?([\d.,]+)\s*(?:<[^>]*>)?\s*€', re.IGNORECASE),
+        # Willhaben and other sites
+        re.compile(r"Kaufpreis[:\s]*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
         re.compile(r"€\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
         re.compile(r"([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)\s*€", re.IGNORECASE),
         re.compile(r"EUR\s*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
         re.compile(r"([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)\s*EUR", re.IGNORECASE),
-        re.compile(r"Kaufpreis[:\s]*([\d.,\s-]+(?:bis|to|~)?[\d.,\s]*)", re.IGNORECASE),
     ]
 
     # Operating costs (Betriebskosten / Nebenkosten) - updated to capture ranges

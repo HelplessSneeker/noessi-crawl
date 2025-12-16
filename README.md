@@ -1,10 +1,11 @@
 # noessi-crawl
 
-A Python-based web crawler for extracting apartment listings from willhaben.at (Austrian real estate portal). Built with crawl4ai and Playwright to scrape property data, perform investment analysis, and generate individual markdown reports for each listing.
+A Python-based web crawler for extracting apartment listings from Austrian real estate portals (Willhaben.at and ImmobilienScout24.at). Built with crawl4ai and Playwright to scrape property data, perform investment analysis, and generate individual markdown reports for each listing.
 
 ## Features
 
-- Automated apartment listing scraping from willhaben.at
+- **Multi-portal support**: Scrapes Willhaben.at and ImmobilienScout24.at
+- Automated apartment listing scraping with configurable portal selection
 - Smart pagination (crawls until no more results found)
 - Configurable search parameters (location area IDs, price range)
 - Ad filtering (excludes promoted listings)
@@ -128,7 +129,7 @@ Edit `config.json` to customize your search:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `portal` | string | Portal name (currently only "willhaben" supported) |
+| `portal` | string | Portal name: "willhaben" or "immoscout" |
 | `postal_codes` | array | List of Austrian postal codes to search (e.g., ["1010", "9020"]) |
 | `output_folder` | string | Output directory (default: "output") |
 | `max_pages` | number/null | Max pages to scrape (null = unlimited) |
@@ -193,7 +194,22 @@ The scraper now uses Austrian postal codes directly (no need to find area IDs):
 - **Klagenfurt**: 9020-9073
 - **Villach**: 9500-9523
 
-Simply add the postal codes you want to search in the `postal_codes` array in config.json. The scraper automatically translates them to willhaben area IDs.
+Simply add the postal codes you want to search in the `postal_codes` array in config.json. The scraper automatically translates them to the appropriate portal-specific format.
+
+### Switching Between Portals
+
+To switch between portals, simply change the `portal` field in config.json:
+
+```json
+{
+  "portal": "willhaben",    // For Willhaben.at
+  // or
+  "portal": "immoscout",    // For ImmobilienScout24.at
+  "postal_codes": ["1010", "1020"]
+}
+```
+
+**Note**: Each portal has its own URL structure and extraction patterns, but the configuration and output format remain consistent.
 
 ## Usage
 
@@ -315,6 +331,14 @@ Apartments are scored on a 0-10 scale:
 noessi-crawl/
 ├── main.py                    # EnhancedApartmentScraper entry point
 ├── config.json                # Configuration file
+├── portals/                   # Portal adapter pattern
+│   ├── __init__.py            # Factory: get_adapter()
+│   ├── base.py                # PortalAdapter abstract base class
+│   ├── willhaben/             # Willhaben.at portal
+│   │   ├── adapter.py         # WillhabenAdapter implementation
+│   │   └── constants.py       # PLZ_TO_AREA_ID, AREA_ID_TO_LOCATION
+│   └── immoscout/             # ImmobilienScout24.at portal
+│       └── adapter.py         # ImmoscoutAdapter implementation
 ├── models/                    # Data models
 │   ├── apartment.py           # ApartmentListing dataclass (~65 fields)
 │   └── constants.py           # Austrian constants (districts, rates)
@@ -379,6 +403,10 @@ noessi-crawl/
 
 ## Technical Details
 
+- **Portal Adapter Pattern**: Abstract base class with portal-specific implementations
+  - Factory pattern for adapter instantiation
+  - 9 required methods per adapter (URL building, extraction, filtering)
+  - Portal-agnostic domain logic (~2,000 LOC shared across portals)
 - **Async operations**: Python asyncio with crawl4ai's AsyncWebCrawler
 - **Headless browser**: Playwright for JavaScript rendering
 - **Multi-strategy extraction**: JSON-LD → Regex (robust patterns) → LLM
@@ -392,7 +420,7 @@ noessi-crawl/
   - Read timeout: 120s (LLM inference time)
   - Hard timeout: 180s (entire LLM operation via asyncio.wait_for)
 - **Diagnostic logging**: INFO-level logs for extracted values, helpful for troubleshooting
-- **Test coverage**: 42 unit tests covering extraction, validation, range parsing
+- **Test coverage**: 79 unit tests covering extraction, validation, portal adapters, and backward compatibility
 
 ## Dependencies
 
@@ -407,13 +435,16 @@ Key packages (see `pyproject.toml`):
 ## Testing
 
 ```bash
-# Run all unit tests (42 tests covering extraction, validation, range parsing)
+# Run all unit tests (79 tests covering extraction, validation, portals)
 uv run pytest tests/ -v
 
 # Test specific modules
-uv run pytest tests/test_extraction.py -v      # Regex patterns and validation (18 tests)
-uv run pytest tests/test_range_parsing.py -v   # Range detection (15 tests)
-uv run pytest tests/test_validation.py -v      # Critical field validation (9 tests)
+uv run pytest tests/test_extraction.py -v              # Regex patterns and validation (18 tests)
+uv run pytest tests/test_range_parsing.py -v           # Range detection (15 tests)
+uv run pytest tests/test_validation.py -v              # Critical field validation (9 tests)
+uv run pytest tests/test_portal_adapters.py -v         # Portal adapter tests (19 tests)
+uv run pytest tests/test_backward_compatibility.py -v  # Legacy config tests (10 tests)
+uv run pytest tests/test_immoscout_basic.py -v         # Immoscout adapter tests (26 tests)
 
 # Integration tests
 uv run python tests/test_simple.py      # Basic scraping functionality
@@ -485,12 +516,39 @@ uv run python tests/test_star_icon.py   # Ad filtering (star icon detection)
 - LLM operations: availability checks, extraction attempts, success/failures, summary generation
 - Summary generation: "LLM summary generated (X chars, Y words)"
 
+## Portal-Specific Details
+
+### Willhaben.at
+- **Status**: Fully functional
+- **URL Structure**: Uses area IDs (auto-translated from postal codes)
+- **Ad Filtering**: Star icon SVG path detection
+- **Data Extraction**: JSON-LD ItemList + regex patterns
+
+### ImmobilienScout24.at
+- **Status**: Functional (first implementation - 2025-12-16)
+- **URL Structure**:
+  - Single postal code: `/regional/{postal_code}/wohnung-kaufen`
+  - Multiple postal codes: `/regional/wohnung-kaufen?zipCode=1010,1020`
+- **Price Extraction**: `data-testid="primary-price"` attribute with German formatting
+- **Known Issues**:
+  - May need refinement based on edge cases
+  - Price pattern handles "ab" (from) prefix for starting prices
+  - All extraction strategies tested with real-world samples
+
 ## Limitations
 
-- Currently only supports willhaben.at
-- Depends on willhaben.at's HTML structure
+**General:**
 - No authentication (public listings only)
 - LLM extraction requires local Ollama installation
+- Single portal per run (no parallel multi-portal execution yet)
+
+**Willhaben.at:**
+- None currently identified
+
+**ImmobilienScout24.at:**
+- First implementation - may need refinement with more diverse listings
+- Some listings may have alternative HTML structures not yet captured
+- Ad filtering patterns may need expansion
 
 ## License
 

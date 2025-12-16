@@ -1,23 +1,18 @@
 {
-  "portal": "willhaben",
+  "portal": "immoscout",
   "postal_codes": [
     "1010",
     "1020",
-    "9020",
-    "9061",
-    "9073",
-    "9500",
-    "9504",
-    "9523"
+    "1120"
   ],
   "output_folder": "output",
-  "max_pages": null,
+  "max_pages": 1,
 
   "llm_settings": {
-    "enabled": true,
+    "enabled": false,
     "model": "qwen2.5:14b",
     "html_max_chars": 100000,
-    "generate_summary": true,
+    "generate_summary": false,
     "summary_max_words": 150,
     "diagnostics_enabled": true,
     "trigger_mode": "conservative",
@@ -28,15 +23,6 @@
   },
 
   "filters": {
-    "min_yield": null,
-    "max_price": 150000,
-    "min_size_sqm": null,
-    "max_size_sqm": null,
-    "excluded_districts": [],
-    "max_betriebskosten_per_sqm": null,
-    "exclude_renovierung_needed": false,
-    "exclude_poor_energy": false,
-    "min_investment_score": null
   },
 
   "analysis": {

@@ -270,3 +270,26 @@ class ApartmentListing:
         filtered_data = {k: v for k, v in data.items() if k in valid_fields}
 
         return cls(**filtered_data)
+
+    def __lt__(self, other: "ApartmentListing") -> bool:
+        """
+        Less than comparison based on investment_score (for sorting).
+
+        Higher scores are "greater than" lower scores (reverse order).
+        None scores are treated as lowest (appear at end when sorted descending).
+        """
+        if not isinstance(other, ApartmentListing):
+            return NotImplemented
+
+        # Handle None scores - treat as lowest value
+        self_score = self.investment_score if self.investment_score is not None else float('-inf')
+        other_score = other.investment_score if other.investment_score is not None else float('-inf')
+
+        # Reverse comparison: higher score is "less than" for descending sort
+        return self_score > other_score
+
+    def __eq__(self, other: "ApartmentListing") -> bool:
+        """Equality comparison based on listing_id."""
+        if not isinstance(other, ApartmentListing):
+            return NotImplemented
+        return self.listing_id == other.listing_id

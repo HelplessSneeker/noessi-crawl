@@ -38,9 +38,9 @@ def get_adapter(config: Dict[str, Any]) -> PortalAdapter:
     elif portal == "immoscout":
         from portals.immoscout.adapter import ImmoscoutAdapter
 
-        logger.warning(
-            "Initializing ImmoscoutAdapter (PLACEHOLDER) - "
-            "no actual scraping will occur"
+        logger.info(
+            "Initializing ImmoscoutAdapter (BEST EFFORT implementation) - "
+            "may require refinement based on actual site structure"
         )
         return ImmoscoutAdapter(config)
 

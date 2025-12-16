@@ -209,7 +209,7 @@ class TestImmoscoutAdapter:
         assert adapter.extract_address_from_html("<html></html>", "https://example.com") is None
 
     def test_placeholder_logs_warnings(self, caplog):
-        """Test placeholder logs warnings for all methods."""
+        """Test adapter logs informational messages (no longer placeholder)."""
         config = {"portal": "immoscout", "filters": {}}
         adapter = ImmoscoutAdapter(config)
 
@@ -217,8 +217,11 @@ class TestImmoscoutAdapter:
         adapter.build_search_url(page=1)
         adapter.extract_listing_urls("<html></html>")
 
-        # Check that warnings were logged
-        assert any("PLACEHOLDER" in record.message for record in caplog.records)
+        # Check that warnings/info were logged (BEST EFFORT, not PLACEHOLDER)
+        # The adapter should log warnings about extraction failures or URL structure
+        assert any("BEST EFFORT" in record.message or "educated guess" in record.message.lower()
+                   or "Failed to extract" in record.message
+                   for record in caplog.records)
 
 
 class TestPortalFactory:
