@@ -236,6 +236,10 @@ class MarkdownGenerator:
         if regulatory:
             frontmatter["regulatory"] = regulatory
 
+        # Data quality warnings
+        if apartment.data_quality_warnings:
+            frontmatter["data_quality_warnings"] = apartment.data_quality_warnings
+
         # Tags for searchability
         tags = self._generate_tags(apartment)
         if tags:
@@ -378,6 +382,13 @@ class MarkdownGenerator:
             )
 
         content.append("")
+
+        # Data quality warnings (if present)
+        if apartment.data_quality_warnings:
+            content.append("\n## ⚠️ Datenqualität-Hinweise\n")
+            for warning in apartment.data_quality_warnings:
+                content.append(f"- **{warning}**")
+            content.append("")
 
         # Property details
         content.append(f"\n## {HEADERS['property_details']}\n")

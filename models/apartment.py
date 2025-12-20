@@ -96,6 +96,9 @@ class ApartmentListing:
     llm_summary: Optional[str] = None
     llm_summary_generated_at: Optional[datetime] = None
 
+    # Data quality tracking
+    data_quality_warnings: List[str] = field(default_factory=list)
+
     # Raw data for debugging
     raw_json_ld: Optional[Dict[str, Any]] = None
     raw_html_excerpt: Optional[str] = None
@@ -125,7 +128,12 @@ class ApartmentListing:
         return None
 
     def calculate_net_yield(self) -> Optional[float]:
-        """Calculate net rental yield after operating costs."""
+        """
+        Calculate net rental yield after operating costs.
+
+        Note: If betriebskosten_monthly is None, uses 0 (optimistic assumption).
+        Check data_quality_warnings for reliability.
+        """
         if self.estimated_rent and self.price and self.price > 0:
             monthly_costs = self.betriebskosten_monthly or 0
             net_monthly = self.estimated_rent - monthly_costs

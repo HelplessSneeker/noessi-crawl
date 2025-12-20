@@ -166,3 +166,19 @@ class PortalAdapter(ABC):
             "delay_before_return_html": 3.0,
             "js_code": "window.scrollTo(0, document.body.scrollHeight);",
         }
+
+    def preprocess_html(self, html: str) -> str:
+        """
+        Preprocess HTML to remove sections that cause false positive extractions.
+
+        Default implementation returns HTML unchanged. Override in portal-specific
+        adapters to remove problematic sections (e.g., mortgage calculators,
+        affordability tools, comparison widgets).
+
+        Args:
+            html: Raw HTML content
+
+        Returns:
+            Cleaned HTML (default: unchanged)
+        """
+        return html

@@ -160,6 +160,9 @@ class EnhancedApartmentScraper:
         """
         listing_id = self.adapter.extract_listing_id(url)
 
+        # Preprocess HTML to remove problematic sections (portal-specific)
+        html = self.adapter.preprocess_html(html)
+
         # Check for ad filtering
         if self.adapter.should_filter_ad(html):
             logger.debug(f"Skipping ad/promoted listing: {url}")
@@ -434,6 +437,25 @@ class EnhancedApartmentScraper:
             if field in data and getattr(apartment, field) is None:
                 setattr(apartment, field, data[field])
 
+        # Populate data quality warnings from extraction metadata
+        if "_betriebskosten_rejected" in data:
+            rejection_info = data["_betriebskosten_rejected"]
+            warning_msg = (
+                f"Betriebskosten-Extraktion abgelehnt: €{rejection_info['value']:.0f} "
+                f"({rejection_info['reason']})"
+            )
+            apartment.data_quality_warnings.append(warning_msg)
+            logger.info(f"Added warning for {apartment.listing_id}: {warning_msg}")
+
+        # Low-confidence warning for suspicious values
+        if apartment.betriebskosten_monthly and apartment.betriebskosten_monthly < 50.0:
+            warning_msg = (
+                f"Betriebskosten €{apartment.betriebskosten_monthly:.0f}/Monat "
+                f"< €50 - Plausibilität prüfen"
+            )
+            apartment.data_quality_warnings.append(warning_msg)
+            logger.info(f"Added low-value warning for {apartment.listing_id}")
+
     def _apply_address_data(
         self, apartment: ApartmentListing, data: Dict[str, Any]
     ) -> None:
@@ -470,10 +492,14 @@ class EnhancedApartmentScraper:
         """
         Validate that critical fields are present for investment analysis.
 
+        Portal-agnostic approach:
+        - ALL portals: Betriebskosten optional (prefer missing data over false positives)
+        - Add warning when missing
+
         Critical fields:
         - price: Must have a purchase price
         - size_sqm: Must know apartment size for per-sqm calculations
-        - betriebskosten_monthly: Essential for cash flow and yield analysis
+        - betriebskosten_monthly: Optional (warning if missing)
 
         Returns:
             (is_valid, rejection_reason)
@@ -495,12 +521,12 @@ class EnhancedApartmentScraper:
                 f"(minimum 10 m² required)"
             )
 
-        # Check operating costs
+        # Betriebskosten: Optional for ALL portals (accept with warning)
         if not apartment.betriebskosten_monthly or apartment.betriebskosten_monthly <= 0:
-            missing_fields.append("betriebskosten_monthly")
-            logger.warning(
-                f"Validation failed for {apartment.listing_id}: "
-                f"betriebskosten_monthly={apartment.betriebskosten_monthly}"
+            warning_msg = "Betriebskosten nicht verfügbar - manuelle Prüfung erforderlich"
+            apartment.data_quality_warnings.append(warning_msg)
+            logger.info(
+                f"{apartment.listing_id}: {warning_msg} - continuing validation"
             )
 
         if missing_fields:

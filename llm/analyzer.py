@@ -185,11 +185,11 @@ class InvestmentAnalyzer:
                         f"Über Marktpreis ({price_ratio:.0%} vom Durchschnitt)"
                     )
 
-        # === Operating costs (up to +0.5) ===
+        # === Operating costs (up to +0.5, penalty -1.0) ===
         if apartment.betriebskosten_monthly is None or apartment.betriebskosten_per_sqm is None:
-            # Missing critical financial data
-            score -= 0.5
-            risk_factors.append("Betriebskosten nicht verfügbar - manuelle Prüfung erforderlich")
+            # Missing critical financial data - STRONGER penalty
+            score -= 1.0  # Changed from -0.5 to -1.0
+            risk_factors.append("Betriebskosten unbekannt - konservative Annahme erforderlich")
         elif apartment.betriebskosten_per_sqm:
             if apartment.betriebskosten_per_sqm < 2.0:
                 score += 0.5

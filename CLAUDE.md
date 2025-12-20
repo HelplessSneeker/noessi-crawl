@@ -213,7 +213,7 @@ The scraper uses the **Portal Adapter Pattern** to support multiple Austrian rea
 
 #### PortalAdapter Interface
 
-Abstract base class defining 9 methods each portal must implement:
+Abstract base class defining 10 methods (7 required, 3 optional):
 
 1. **`get_portal_name() -> str`** - Portal identifier ("willhaben", "immoscout")
 2. **`normalize_config(config) -> Dict`** - Translate config to portal format
@@ -224,6 +224,7 @@ Abstract base class defining 9 methods each portal must implement:
 7. **`extract_address_from_html(html, url) -> Optional[str]`** - Extract raw address
 8. **`get_crawler_config() -> Dict`** - Detail page crawler settings (optional override)
 9. **`get_search_crawler_config() -> Dict`** - Search page crawler settings (optional override)
+10. **`preprocess_html(html) -> str`** - Clean HTML before extraction (optional override, NEW - 2025-12-19)
 
 #### Current Implementations
 
@@ -244,6 +245,7 @@ Abstract base class defining 9 methods each portal must implement:
 - Supports "ab" (from) price prefix
 - Pattern-based ad filtering (premium, sponsored, featured badges)
 - Multi-source address extraction (JSON-LD, HTML patterns, URL parsing)
+- **HTML preprocessing** (NEW - 2025-12-19): Removes "Kann ich mir diese Immobilie leisten?" affordability calculator section to prevent false positive extractions
 - Comprehensive logging for debugging
 - Status: **Production-ready** (tested with 15+ listings, 13 validated successfully)
 
@@ -272,11 +274,12 @@ These components work across ANY Austrian portal without modification:
 1. **Initialization**: Load config, create portal adapter via factory
 2. **URL Building**: Adapter builds search URL with portal-specific parameters
 3. **Page Scraping**: Fetches listing pages, adapter extracts URLs
-4. **Apartment Processing**: Fetches detail pages, multi-strategy extraction
-5. **Critical Field Validation**: Rejects apartments missing price, size_sqm, betriebskosten_monthly
-6. **Investment Analysis**: Calculates metrics and score via `InvestmentAnalyzer`
-7. **Sorting & Saving**: Ranks by score, top N → active, rest → rejected
-8. **Report Generation**: Creates synchronized markdown + PDF reports
+4. **HTML Preprocessing**: Portal adapter cleans HTML (removes calculators, widgets)
+5. **Apartment Processing**: Fetches detail pages, multi-strategy extraction
+6. **Critical Field Validation**: Rejects apartments missing price, size_sqm (betriebskosten_monthly now optional with warnings)
+7. **Investment Analysis**: Calculates metrics and score via `InvestmentAnalyzer`
+8. **Sorting & Saving**: Ranks by score, top N → active, rest → rejected
+9. **Report Generation**: Creates synchronized markdown + PDF reports
 
 ### Data Extraction Pipeline
 
@@ -303,7 +306,14 @@ These components work across ANY Austrian portal without modification:
    - Quality-checked when enabled
    - Configurable timeout (default 120s)
 6. **Critical Field Validation** (`_validate_critical_fields()`):
-   - Required: price > 0, size_sqm ≥ 10 m², betriebskosten_monthly > 0
+   - Required: price > 0, size_sqm ≥ 10 m²
+   - Optional: betriebskosten_monthly (adds warning if missing, -1.0 score penalty)
+   - **Betriebskosten Post-Validation** (NEW - 2025-12-20): Context-aware rejection to prevent false positives
+     - Rejects 4-digit values ≥€1,000 (postal codes: 1010, 1020, etc.)
+     - Rejects percentage context (20% nebenkosten)
+     - Rejects size measurements (20 m², 20 qm)
+     - Rejects street addresses (Arndtstraße 50, Gasse 4)
+     - Stores rejections in `data_quality_warnings` field
    - Logged rejections at WARNING level
    - Prevents invalid data from polluting analysis
 
@@ -325,7 +335,8 @@ These components work across ANY Austrian portal without modification:
 - Energy efficiency: +0.5
 - Features: +0.5
 - Positive cash flow: +0.5
-- Penalties for negatives
+- **Missing betriebskosten**: -1.0 (changed from -0.5 on 2025-12-20)
+- Other penalties for negatives
 
 **Recommendations** (German):
 - STARK KAUFEN (8.0+): "Ausgezeichnete Investition"
@@ -448,6 +459,7 @@ Each apartment: `YYYY-MM-DD_city_district_price.md`
 **Property** (11): title, size_sqm, rooms, floor, year_built, etc.
 **Features** (20+): condition, elevator, balcony, parking, energy_rating, etc.
 **Investment** (10+): gross_yield, net_yield, investment_score, recommendation, llm_summary, etc.
+**Data Quality** (NEW - 2025-12-20): data_quality_warnings (list of extraction issues)
 **Metadata**: raw_json_ld, description, tags
 
 ## Testing
@@ -546,10 +558,11 @@ Edit `utils/translations.py`:
 - Fully supported, no known limitations
 
 **ImmobilienScout24.at** (Status: Production-ready):
-- Betriebskosten (operating costs) not extracted - site doesn't display prominently
+- Betriebskosten (operating costs) rarely available - site doesn't display prominently
+- **Post-validation prevents false positives** (2025-12-20): Rejects postal codes, percentages, street addresses
+- Apartments without betriebskosten receive warnings and -1.0 score penalty (not rejected)
 - Some listings hide address ("Adresse anfragen") - site-specific behavior
 - Multi-page pagination tested but not extensively validated
-- May require refinement for edge cases based on real-world usage
 
 ## Troubleshooting
 

@@ -431,6 +431,69 @@ class AustrianRealEstateExtractor:
             logger.debug(f"DOM extraction failed: {e}")
             return {}
 
+    def _validate_betriebskosten_extraction(
+        self,
+        value: float,
+        html: str,
+        match_obj: re.Match
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Validate extracted betriebskosten against false positive patterns.
+
+        Rejection Rules:
+        1. Value ≥ €1,000 (blocks postal codes: 1010, 1020, 9020, etc.)
+        2. Percentage context (20% nebenkosten)
+        3. PLZ context (PLZ 1020, Postleitzahl)
+        4. Size measurement context (20 m², 20 qm)
+        5. Value < €30 (existing minimum)
+
+        Args:
+            value: Extracted numeric value (in euros)
+            html: Full HTML content
+            match_obj: Regex match object containing extraction position
+
+        Returns:
+            (is_valid, rejection_reason)
+            - (True, None) if value passes validation
+            - (False, "reason") if value is false positive
+        """
+        # Rule 1: 4-digit threshold (postal codes)
+        if value >= 1000.0:
+            return (False, "Wert ≥€1000 - möglicherweise Postleitzahl")
+
+        # Rule 2-4: Check ±200 chars context for false positive indicators
+        extraction_pos = match_obj.start()
+        context_start = max(0, extraction_pos - 200)
+        context_end = min(len(html), extraction_pos + 200)
+        context = html[context_start:context_end].lower()
+
+        # Context-based rejection patterns
+        false_positive_indicators = [
+            r'\d+\s*%',                    # "20%"
+            r'prozent',                    # "prozent"
+            r'\bplz\b',                    # "PLZ"
+            r'postleitzahl',               # "postleitzahl"
+            r'\d+\s*m²',                   # "20 m²" (size, not cost)
+            r'\d+\s*m2',                   # "20 m2" (alternative notation)
+            r'\d+\s*qm',                   # "20 qm" (German abbreviation)
+            r'straße\s+\d+',               # "Arndtstraße 50" (street address)
+            r'strasse\s+\d+',              # "Arndtstrasse 50" (street address, alternate spelling)
+            r'gasse\s+\d+',                # "Wolfgang-Schmälzl-Gasse 4" (street address)
+            r'weg\s+\d+',                  # "Hauptweg 15" (street address)
+            r'platz\s+\d+',                # "Rathausplatz 12" (street address)
+            r'allee\s+\d+',                # "Hauptallee 8" (street address)
+        ]
+
+        for pattern in false_positive_indicators:
+            if re.search(pattern, context):
+                return (False, f"Ungültiger Kontext erkannt: {pattern}")
+
+        # Rule 5: Minimum threshold (existing)
+        if value < 30.0:
+            return (False, f"Wert €{value:.0f} < €30 - unplausibel niedrig")
+
+        return (True, None)
+
     def extract_from_html(self, html: str) -> Dict[str, Any]:
         """
         Extract all available fields from HTML content.
@@ -460,17 +523,54 @@ class AustrianRealEstateExtractor:
         if price_str:
             extracted["price"] = self.parse_number_with_range(price_str)
 
-        # Betriebskosten / Nebenkosten - with range parsing
+        # Betriebskosten / Nebenkosten - with post-validation
         # Use min_value to reject placeholder values like "€1"
         bk_str = self.extract_field(
             html,
             self.BETRIEBSKOSTEN_PATTERNS,
-            min_value=10.0,  # Reject unrealistic values under €10/month
-            max_value=2000.0,  # Sanity check: max €2000/month
+            min_value=10.0,   # Pre-filter: reject < €10/month
+            max_value=2000.0,  # Pre-filter: reject > €2000/month
             parse_ranges=True
         )
         if bk_str:
-            extracted["betriebskosten_monthly"] = self.parse_number_with_range(bk_str)
+            bk_value = self.parse_number_with_range(bk_str)
+            if bk_value:
+                # Find match object for context analysis
+                match_found = False
+                for pattern in self.BETRIEBSKOSTEN_PATTERNS:
+                    match = pattern.search(html)
+                    if match:
+                        # Check if this match corresponds to our extracted value
+                        # by comparing the extracted number
+                        try:
+                            match_value_str = match.group(1).replace(',', '.').replace(' ', '')
+                            match_value = float(match_value_str.split('-')[0].split('~')[0].split('bis')[0])
+                            if abs(match_value - bk_value) < 0.01:  # Float comparison tolerance
+                                # Post-validation check
+                                is_valid, rejection_reason = self._validate_betriebskosten_extraction(
+                                    bk_value, html, match
+                                )
+                                if is_valid:
+                                    extracted["betriebskosten_monthly"] = bk_value
+                                    logger.info(f"Betriebskosten extracted: €{bk_value:.0f}/Monat")
+                                else:
+                                    logger.warning(
+                                        f"Betriebskosten €{bk_value:.0f} rejected: {rejection_reason}"
+                                    )
+                                    # Store rejection for warning
+                                    extracted["_betriebskosten_rejected"] = {
+                                        "value": bk_value,
+                                        "reason": rejection_reason
+                                    }
+                                match_found = True
+                                break
+                        except (ValueError, IndexError, AttributeError):
+                            continue
+
+                # If no match found but we have a value, accept it (fallback)
+                if not match_found and "betriebskosten_monthly" not in extracted:
+                    logger.info(f"Betriebskosten extracted (no context check): €{bk_value:.0f}/Monat")
+                    extracted["betriebskosten_monthly"] = bk_value
 
         # Reparaturrücklage - with range parsing
         rep_str = self.extract_field(html, self.REPARATUR_PATTERNS, parse_ranges=True)

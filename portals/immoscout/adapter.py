@@ -459,3 +459,66 @@ class ImmoscoutAdapter(PortalAdapter):
             "delay_before_return_html": 2000,
             "timeout": 30000,
         }
+
+    def preprocess_html(self, html: str) -> str:
+        """
+        Preprocess HTML to remove sections that cause false positive extractions.
+
+        Removes the "Kann ich mir diese Immobilie leisten?" (affordability calculator)
+        section which contains numbers that are incorrectly extracted as apartment data.
+
+        Args:
+            html: Raw HTML content
+
+        Returns:
+            Cleaned HTML with problematic sections removed
+        """
+        if not html:
+            return html
+
+        # Pattern 1: Remove entire div/section containing "Kann ich mir diese Immobilie leisten?"
+        # This pattern matches opening tag up to closing tag, accounting for nested elements
+        patterns = [
+            # Match div containing the text and everything until its closing tag
+            r'<div[^>]*>(?:[^<]|<(?!div|/div))*Kann ich mir diese Immobilie leisten\?.*?</div>',
+            # Match section containing the text
+            r'<section[^>]*>(?:[^<]|<(?!section|/section))*Kann ich mir diese Immobilie leisten\?.*?</section>',
+            # Match article containing the text
+            r'<article[^>]*>(?:[^<]|<(?!article|/article))*Kann ich mir diese Immobilie leisten\?.*?</article>',
+        ]
+
+        cleaned_html = html
+        for pattern in patterns:
+            # Use DOTALL flag to match across newlines
+            cleaned_html = re.sub(pattern, '', cleaned_html, flags=re.DOTALL | re.IGNORECASE)
+
+        # Pattern 2: Remove entire tree by finding the parent container
+        # Look for common container patterns around the affordability text
+        # This uses a more aggressive approach to find and remove parent containers
+        affordability_pattern = r'Kann ich mir diese Immobilie leisten\?'
+        if re.search(affordability_pattern, cleaned_html, re.IGNORECASE):
+            # Try to find and remove parent containers using a more sophisticated approach
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(cleaned_html, 'html.parser')
+
+                # Find all elements containing the text
+                for element in soup.find_all(string=re.compile(affordability_pattern, re.IGNORECASE)):
+                    # Get the parent container (go up to find div/section/article)
+                    parent = element.parent
+                    while parent:
+                        if parent.name in ['div', 'section', 'article', 'aside']:
+                            # Remove this entire container
+                            logger.debug(f"Removing affordability calculator: <{parent.name}> container")
+                            parent.decompose()
+                            break
+                        parent = parent.parent
+
+                cleaned_html = str(soup)
+                logger.info("Removed 'Kann ich mir diese Immobilie leisten?' section using BeautifulSoup")
+
+            except ImportError:
+                # BeautifulSoup not available, fall back to simpler pattern
+                logger.debug("BeautifulSoup not available for HTML cleaning, using regex fallback")
+
+        return cleaned_html

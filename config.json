@@ -9,7 +9,7 @@
   "max_pages": 1,
 
   "llm_settings": {
-    "enabled": false,
+    "enabled": true,
     "model": "qwen2.5:14b",
     "html_max_chars": 100000,
     "generate_summary": false,

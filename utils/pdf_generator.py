@@ -355,6 +355,9 @@ class PDFGenerator:
         # Two-column layout
         self._draw_two_column_layout(apt)
 
+        # Data quality warnings (if present)
+        self._draw_data_quality_warnings(apt)
+
         # Investment analysis section (full width)
         self._draw_investment_analysis(apt)
 
@@ -583,6 +586,39 @@ class PDFGenerator:
         self.pdf.multi_cell(width, 4, location)
 
         self.pdf.set_text_color(0, 0, 0)
+
+    def _draw_data_quality_warnings(self, apt: ApartmentListing):
+        """Draw data quality warnings section if present."""
+        if not apt.data_quality_warnings:
+            return
+
+        # Check if we need a new page
+        if self.pdf.get_y() > 250:
+            self.pdf.add_page()
+
+        self.pdf.ln(5)
+
+        # Section header
+        self.pdf.set_font("NotoSans", "B", 10)
+        self.pdf.set_text_color(*self.COLOR_POOR)  # Red for warnings
+        self.pdf.cell(0, 6, "Datenqualitaet-Hinweise", ln=True)
+
+        # Warnings
+        self.pdf.set_font("NotoSans", "", 9)
+        self.pdf.set_text_color(0, 0, 0)
+        for warning in apt.data_quality_warnings:
+            # Use simple bullet and proper margins
+            x_start = self.pdf.get_x()
+            self.pdf.cell(5, 5, "-", ln=False)
+            self.pdf.set_x(x_start + 5)
+
+            # Multi-cell with proper width (page width - margins - bullet indent)
+            # Page width is 210mm, margins are 10mm on each side, bullet indent is 5mm
+            available_width = 210 - 10 - 10 - 5
+            self.pdf.multi_cell(available_width, 5, warning)
+
+        self.pdf.ln(3)
+        self.pdf.set_text_color(0, 0, 0)  # Reset to black
 
     def _draw_investment_analysis(self, apt: ApartmentListing):
         """Draw full-width investment analysis section."""

@@ -11,19 +11,21 @@ A Python-based web crawler for extracting apartment listings from Austrian real 
 - Ad filtering (excludes promoted listings)
 - **Robust data extraction** with validation:
   - Multi-strategy: JSON-LD → Regex → Optional LLM (improved)
-  - **NEW: Enhanced LLM extraction** with 5-strategy JSON parsing, HTML preprocessing, 50KB limit
-  - **NEW: Diagnostic logging** for raw LLM responses (configurable)
-  - Strict validation (size ≥ 10 m²) prevents extraction errors
+  - **Enhanced LLM extraction** with 5-strategy JSON parsing, HTML preprocessing, 100KB limit
+  - **Diagnostic logging** for raw LLM responses (configurable)
+  - **Data quality warnings** (NEW - 2025-12-20): Tracks extraction issues, missing fields, rejected values
+  - **Betriebskosten post-validation** (NEW - 2025-12-20): Prevents false positives from postal codes, percentages, street addresses
+  - Critical field validation: price, size_sqm required; betriebskosten optional with warnings
   - Negative lookbehind patterns reject partial numbers
-  - Relaxed LLM validation thresholds (€10+ betriebskosten, €1+ reparaturrücklage)
+  - Relaxed LLM validation thresholds (€30+ betriebskosten, €10+ reparaturrücklage)
 - **Investment Analysis**:
   - Yield calculations (gross/net)
   - Cash flow projections
   - Investment scoring (0-10 scale)
   - Recommendations (STRONG BUY to AVOID)
   - **NEW: AI-generated investment summaries** (100-150 words, German, optional)
-- **Individual markdown files** per apartment with YAML frontmatter
-- **PDF investment reports** with professional styling, clickable navigation, and AI summaries
+- **Individual markdown files** per apartment with YAML frontmatter and data quality warnings
+- **PDF investment reports** with professional styling, clickable navigation, AI summaries, and warning indicators
 - **Timestamped run folders** for each scrape session
 - Top N apartments saved to `active/`, rest to `rejected/`
 - Summary report (markdown + PDF) with links to apartment files
@@ -317,6 +319,7 @@ Apartments are scored on a 0-10 scale:
 | Energy efficiency | +0.5 |
 | Features (elevator, etc.) | +0.5 |
 | Positive cash flow | +0.5 |
+| Missing betriebskosten | -1.0 |
 
 **Recommendations:**
 - STRONG BUY: 8.0+
@@ -370,7 +373,13 @@ noessi-crawl/
    - Min/max validation at extraction (size: 10-500 m²)
    - Range detection with conservative lower-bound extraction
 3. **Critical field validation**:
-   - Strict minimums: size ≥ 10 m², price > 0, costs > 0
+   - Required: size ≥ 10 m², price > 0
+   - Optional: betriebskosten (adds warning if missing, -1.0 score penalty)
+   - **Betriebskosten post-validation** (NEW - 2025-12-20): Rejects false positives
+     - Postal codes (1010, 1020 → rejected)
+     - Percentages (20% → rejected)
+     - Street addresses (Arndtstraße 50 → rejected)
+     - Size measurements (20 m² → rejected)
    - Diagnostic logging shows extracted values for debugging
 4. **LLM extraction** (optional, improved): Ollama for missing fields
    - **HTML preprocessing** (strips scripts/styles, 100KB limit)
@@ -546,7 +555,8 @@ uv run python tests/test_star_icon.py   # Ad filtering (star icon detection)
 - None currently identified
 
 **ImmobilienScout24.at:**
-- First implementation - may need refinement with more diverse listings
+- Betriebskosten rarely available (site limitation) - apartments get warnings, not rejected
+- Post-validation prevents false positives (postal codes, percentages, addresses)
 - Some listings may have alternative HTML structures not yet captured
 - Ad filtering patterns may need expansion
 
